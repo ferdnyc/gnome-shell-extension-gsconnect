@@ -1,2 +1,4 @@
 #theme: jekyll-theme-slate
 remote-theme: pawamoy/jekyll-readthedocs
+
+theme: jekyll-theme-leap-day
