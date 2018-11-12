@@ -44,13 +44,14 @@ class TestPackageKit {
     var resolve, whatprovides;
     print("Starting tests...");
     try {
-      resolve = _client.what_provides(
+      resolve = _client.resolve(
         PackageKit.filter_bitfield_from_string('arch;newest'),
-        ['nautilus-python'], null, this._progress);
+        ['pygobject3', 'nautilus-python', 'python-nautilus'], null, this._progress);
       resolve = resolve.get_package_array();
+
       whatprovides = _client.what_provides(
         PackageKit.filter_bitfield_from_string('arch;newest'),
-        ['nautilus-python'], null, this._progress);
+        ['nautilus-python', 'python-nautilus', 'pygobject3', 'python2-nautilus'], null, this._progress);
       whatprovides = whatprovides.get_package_array();
     } catch (e) {
       logError(e);
