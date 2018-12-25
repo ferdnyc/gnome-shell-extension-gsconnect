@@ -52,6 +52,10 @@ var Plugin = GObject.registerClass({
     }
 
     get has_sshfs() {
+        if (this.settings.get_boolean('disable-sshfs')) {
+            return false;
+        }
+
         return GLib.find_program_in_path(gsconnect.metadata.bin.sshfs);
     }
 
