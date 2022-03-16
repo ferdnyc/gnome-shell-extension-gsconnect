@@ -1,18 +1,19 @@
 'use strict';
 
-const Gio = imports.gi.Gio;
-const GLib = imports.gi.GLib;
 const GObject = imports.gi.GObject;
 
-const PluginsBase = imports.service.plugins.base;
+const Components = imports.service.components;
+const Config = imports.config;
+const PluginBase = imports.service.plugin;
 
 
 var Metadata = {
     label: _('System Volume'),
+    description: _('Enable the paired device to control the system volume'),
     id: 'org.gnome.Shell.Extensions.GSConnect.Plugin.SystemVolume',
     incomingCapabilities: ['kdeconnect.systemvolume.request'],
     outgoingCapabilities: ['kdeconnect.systemvolume'],
-    actions: {}
+    actions: {},
 };
 
 
@@ -22,34 +23,38 @@ var Metadata = {
  * https://github.com/KDE/kdeconnect-android/tree/master/src/org/kde/kdeconnect/Plugins/SystemvolumePlugin/
  */
 var Plugin = GObject.registerClass({
-    GTypeName: 'GSConnectSystemVolumePlugin'
-}, class Plugin extends PluginsBase.Plugin {
+    GTypeName: 'GSConnectSystemVolumePlugin',
+}, class Plugin extends PluginBase.Plugin {
 
     _init(device) {
         super._init(device, 'systemvolume');
 
-        try {
-            // Cache stream properties
-            this._cache = new WeakMap();
+        // Cache stream properties
+        this._cache = new WeakMap();
 
-            // Connect to the mixer
-            this._streamChangedId = this.service.pulseaudio.connect(
+        // Connect to the mixer
+        try {
+            this._mixer = Components.acquire('pulseaudio');
+
+            this._streamChangedId = this._mixer.connect(
                 'stream-changed',
                 this._sendSink.bind(this)
             );
 
-            this._outputAddedId = this.service.pulseaudio.connect(
+            this._outputAddedId = this._mixer.connect(
                 'output-added',
                 this._sendSinkList.bind(this)
             );
 
-            this._outputRemovedId = this.service.pulseaudio.connect(
+            this._outputRemovedId = this._mixer.connect(
                 'output-removed',
                 this._sendSinkList.bind(this)
             );
+
+        // Modify the error to redirect to the wiki
         } catch (e) {
-            this.destroy();
-            e.name = 'GvcError';
+            e.name = _('PulseAudio not found');
+            e.url = `${Config.PACKAGE_URL}/wiki/Error#pulseaudio-not-found`;
             throw e;
         }
     }
@@ -74,11 +79,13 @@ var Plugin = GObject.registerClass({
 
     /**
      * Handle a request to change an output
+     *
+     * @param {Core.Packet} packet - a `kdeconnect.systemvolume.request`
      */
     _changeSink(packet) {
         let stream;
 
-        for (let sink of this.service.pulseaudio.get_sinks()) {
+        for (const sink of this._mixer.get_sinks()) {
             if (sink.name === packet.body.name) {
                 stream = sink;
                 break;
@@ -92,16 +99,16 @@ var Plugin = GObject.registerClass({
         }
 
         // Get a cache and store volume and mute states if changed
-        let cache = this._cache.get(stream) || [null, null, null];
+        const cache = this._cache.get(stream) || {};
 
         if (packet.body.hasOwnProperty('muted')) {
-            cache[1] = packet.body.muted;
+            cache.muted = packet.body.muted;
             this._cache.set(stream, cache);
             stream.change_is_muted(packet.body.muted);
         }
 
         if (packet.body.hasOwnProperty('volume')) {
-            cache[0] = packet.body.volume;
+            cache.volume = packet.body.volume;
             this._cache.set(stream, cache);
             stream.volume = packet.body.volume;
             stream.push_volume();
@@ -109,91 +116,85 @@ var Plugin = GObject.registerClass({
     }
 
     /**
+     * Update the cache for @stream
+     *
+     * @param {Gvc.MixerStream} stream - The stream to cache
+     * @return {Object} The updated cache object
+     */
+    _updateCache(stream) {
+        const state = {
+            name: stream.name,
+            description: stream.display_name,
+            muted: stream.is_muted,
+            volume: stream.volume,
+            maxVolume: this._mixer.get_vol_max_norm(),
+        };
+
+        this._cache.set(stream, state);
+
+        return state;
+    }
+
+    /**
      * Send the state of a local sink
      *
      * @param {Gvc.MixerControl} mixer - The mixer that owns the stream
-     * @param {Number} id - The Id of the stream that changed
+     * @param {number} id - The Id of the stream that changed
      */
     _sendSink(mixer, id) {
-        let stream = this.service.pulseaudio.lookup_stream_id(id);
+        // Avoid starving the packet channel when fading
+        if (this._mixer.fading)
+            return;
 
-        // Get a cache to check for changes
-        let cache = this._cache.get(stream) || [null, null, null];
+        // Check the cache
+        const stream = this._mixer.lookup_stream_id(id);
+        const cache = this._cache.get(stream) || {};
 
-        switch (true) {
-            // If the port (we show in the description) has changed we have to
-            // send the whole list to show the change
-            case (cache[2] !== stream.display_name):
-                this._sendSinkList();
-                return;
-
-            // If only volume and/or mute are set, send a single update
-            case (cache[0] !== stream.volume):
-            case (cache[1] !== stream.is_muted):
-                this._cache.set(stream, [
-                    stream.volume,
-                    stream.is_muted,
-                    stream.display_name
-                ]);
-                break;
-
-            // Bail if nothing relevant has changed
-            default:
-                return;
+        // If the port has changed we have to send the whole list to update the
+        // display name
+        if (!cache.display_name || cache.display_name !== stream.display_name) {
+            this._sendSinkList();
+            return;
         }
 
-        // Send the stream update
-        this.device.sendPacket({
-            type: 'kdeconnect.systemvolume',
-            body: {
-                name: stream.name,
-                volume: stream.volume,
-                muted: stream.is_muted
-            }
-        });
+        // If only volume and/or mute are set, send a single update
+        if (cache.volume !== stream.volume || cache.muted !== stream.is_muted) {
+            // Update the cache
+            const state = this._updateCache(stream);
+
+            // Send the stream update
+            this.device.sendPacket({
+                type: 'kdeconnect.systemvolume',
+                body: state,
+            });
+        }
     }
 
     /**
      * Send a list of local sinks
      */
     _sendSinkList() {
-        let sinkList = this.service.pulseaudio.get_sinks().map(sink => {
-            // Cache the sink state
-            this._cache.set(sink, [
-                sink.volume,
-                sink.is_muted,
-                sink.display_name
-            ]);
-
-            // return a sinkList entry
-            return {
-                name: sink.name,
-                description: sink.display_name,
-                muted: sink.is_muted,
-                volume: sink.volume,
-                maxVolume: this.service.pulseaudio.get_vol_max_norm()
-            };
+        const sinkList = this._mixer.get_sinks().map(sink => {
+            return this._updateCache(sink);
         });
 
         // Send the sinkList
         this.device.sendPacket({
-            id: 0,
             type: 'kdeconnect.systemvolume',
             body: {
-                sinkList: sinkList
-            }
+                sinkList: sinkList,
+            },
         });
     }
 
     destroy() {
-        try {
-            this.service.pulseaudio.disconnect(this._streamChangedId);
-            this.service.pulseaudio.disconnect(this._outputAddedId);
-            this.service.pulseaudio.disconnect(this._outputRemovedId);
-        } catch (e) {
+        if (this._mixer !== undefined) {
+            this._mixer.disconnect(this._streamChangedId);
+            this._mixer.disconnect(this._outputAddedId);
+            this._mixer.disconnect(this._outputRemovedId);
+            this._mixer = Components.release('pulseaudio');
         }
 
         super.destroy();
     }
 });
-

@@ -1,5 +1,6 @@
 'use strict';
 
+const Config = imports.misc.config;
 const Main = imports.ui.main;
 const Meta = imports.gi.Meta;
 const Shell = imports.gi.Shell;
@@ -31,13 +32,12 @@ var Manager = class Manager {
         );
     }
 
-    _onAcceleratorActivated(display, action, deviceId, timestamp) {
+    _onAcceleratorActivated(display, action, inputDevice, timestamp) {
         try {
-            let binding = this._keybindings.get(action);
+            const binding = this._keybindings.get(action);
 
-            if (binding !== undefined) {
+            if (binding !== undefined)
                 binding.callback();
-            }
         } catch (e) {
             logError(e);
         }
@@ -46,32 +46,35 @@ var Manager = class Manager {
     /**
      * Add a keybinding with callback
      *
-     * @param {String} accelerator - An accelerator in the form '<Control>q'
+     * @param {string} accelerator - An accelerator in the form '<Control>q'
      * @param {Function} callback - A callback for the accelerator
-     * @return {Number} - A non-zero action id on success, or 0 on failure
+     * @return {number} A non-zero action id on success, or 0 on failure
      */
     add(accelerator, callback) {
-        let action = global.display.grab_accelerator(accelerator);
+        try {
+            const action = global.display.grab_accelerator(accelerator, 0);
 
-        if (action !== Meta.KeyBindingAction.NONE) {
-            let name = Meta.external_binding_name_for_action(action);
+            if (action === Meta.KeyBindingAction.NONE)
+                throw new Error(`Failed to add keybinding: '${accelerator}'`);
+
+            const name = Meta.external_binding_name_for_action(action);
             Main.wm.allowKeybinding(name, Shell.ActionMode.ALL);
             this._keybindings.set(action, {name: name, callback: callback});
-        } else {
-            logError(new Error(`Failed to add keybinding: '${accelerator}'`));
-        }
 
-        return action;
+            return action;
+        } catch (e) {
+            logError(e);
+        }
     }
 
     /**
      * Remove a keybinding
      *
-     * @param {Number} accelerator - A non-zero action id returned by add()
+     * @param {number} action - A non-zero action id returned by add()
      */
     remove(action) {
         try {
-            let binding = this._keybindings.get(action);
+            const binding = this._keybindings.get(action);
             global.display.ungrab_accelerator(action);
             Main.wm.allowKeybinding(binding.name, Shell.ActionMode.NONE);
             this._keybindings.delete(action);
@@ -84,9 +87,8 @@ var Manager = class Manager {
      * Remove all keybindings
      */
     removeAll() {
-        for (let action of this._keybindings.keys()) {
+        for (const action of this._keybindings.keys())
             this.remove(action);
-        }
     }
 
     /**

@@ -1,100 +1,136 @@
 'use strict';
 
 const Clutter = imports.gi.Clutter;
-const Gio = imports.gi.Gio;
 const GObject = imports.gi.GObject;
 const St = imports.gi.St;
 
 const PanelMenu = imports.ui.panelMenu;
 const PopupMenu = imports.ui.popupMenu;
 
-const _ = gsconnect._;
-const GMenu = imports.shell.gmenu;
-const Tooltip = imports.shell.tooltip;
+const Extension = imports.misc.extensionUtils.getCurrentExtension();
+
+// eslint-disable-next-line no-redeclare
+const _ = Extension._;
+const GMenu = Extension.imports.shell.gmenu;
+const Tooltip = Extension.imports.shell.tooltip;
 
 
-
-var BATTERY_INTERFACE = 'org.gnome.Shell.Extensions.GSConnect.Battery';
-
-
-/** St.BoxLayout subclass for a battery icon with text percentage */
+/**
+ * A battery widget with an icon, text percentage and time estimate tooltip
+ */
 var Battery = GObject.registerClass({
-    GTypeName: 'GSConnectShellDeviceBattery'
+    GTypeName: 'GSConnectShellDeviceBattery',
 }, class Battery extends St.BoxLayout {
 
     _init(params) {
         super._init({
             reactive: true,
             style_class: 'gsconnect-device-battery',
-            track_hover: true
+            track_hover: true,
         });
         Object.assign(this, params);
 
         // Percent Label
         this.label = new St.Label({
-            y_align: Clutter.ActorAlign.CENTER
+            y_align: Clutter.ActorAlign.CENTER,
         });
         this.label.clutter_text.ellipsize = 0;
         this.add_child(this.label);
 
         // Battery Icon
         this.icon = new St.Icon({
-            fallback_icon_name: 'battery-missing-symbolic'
+            fallback_icon_name: 'battery-missing-symbolic',
+            icon_size: 16,
         });
         this.add_child(this.icon);
 
         // Battery Estimate
         this.tooltip = new Tooltip.Tooltip({
             parent: this,
-            text: this.battery_label
+            text: null,
         });
 
-        // Battery Added/Removed
-        this._interfaceAddedId = this.object.connect(
-            'interface-added',
-            this._onInterfaceAdded.bind(this)
+        // Battery GAction
+        this._actionAddedId = this.device.action_group.connect(
+            'action-added',
+            this._onActionChanged.bind(this)
+        );
+        this._actionRemovedId = this.device.action_group.connect(
+            'action-removed',
+            this._onActionChanged.bind(this)
+        );
+        this._actionStateChangedId = this.device.action_group.connect(
+            'action-state-changed',
+            this._onStateChanged.bind(this)
         );
 
-        this._interfaceRemovedId = this.object.connect(
-            'interface-removed',
-            this._onInterfaceRemoved.bind(this)
-        );
+        this._onActionChanged(this.device.action_group, 'battery');
 
-        // Battery proxy
-        let iface = this.object.get_interface(BATTERY_INTERFACE);
-        if (iface) this._onInterfaceAdded(null, iface);
-
-        // Refresh when mapped
-        this._mappedId = this.connect('notify::mapped', this._sync.bind(this));
-        this._sync();
-
-        // Cleanup
+        // Cleanup on destroy
         this.connect('destroy', this._onDestroy);
     }
 
-    get battery_label() {
-        if (!this.battery) return null;
+    _onActionChanged(action_group, action_name) {
+        if (action_name !== 'battery')
+            return;
 
-        let {Charging, Level, Time} = this.battery;
+        if (action_group.has_action('battery')) {
+            const value = action_group.get_action_state('battery');
+            const [charging, icon_name, level, time] = value.deepUnpack();
 
-        if (Level === 100) {
-            // TRANSLATORS: When the battery level is 100%
-            return _('Fully Charged');
-        } else if (Time === 0) {
-            // TRANSLATORS: When no time estimate for the battery is available
-            // EXAMPLE: 42% (Estimating…)
-            return _('%d%% (Estimating…)').format(Level);
+            this._state = {
+                charging: charging,
+                icon_name: icon_name,
+                level: level,
+                time: time,
+            };
+        } else {
+            this._state = null;
         }
 
-        Time = Time / 60;
-        let minutes = Math.floor(Time % 60);
-        let hours = Math.floor(Time / 60);
+        this._sync();
+    }
 
-        if (Charging) {
+    _onStateChanged(action_group, action_name, value) {
+        if (action_name !== 'battery')
+            return;
+
+        const [charging, icon_name, level, time] = value.deepUnpack();
+
+        this._state = {
+            charging: charging,
+            icon_name: icon_name,
+            level: level,
+            time: time,
+        };
+
+        this._sync();
+    }
+
+    _getBatteryLabel() {
+        if (!this._state)
+            return null;
+
+        const {charging, level, time} = this._state;
+
+        if (level === 100)
+            // TRANSLATORS: When the battery level is 100%
+            return _('Fully Charged');
+
+        if (time === 0)
+            // TRANSLATORS: When no time estimate for the battery is available
+            // EXAMPLE: 42% (Estimating…)
+            return _('%d%% (Estimating…)').format(level);
+
+        const total = time / 60;
+        const minutes = Math.floor(total % 60);
+        const hours = Math.floor(total / 60);
+
+        if (charging) {
             // TRANSLATORS: Estimated time until battery is charged
             // EXAMPLE: 42% (1:15 Until Full)
             return _('%d%% (%d\u2236%02d Until Full)').format(
-                Level,
+                level,
                 hours,
                 minutes
             );
@@ -102,7 +138,7 @@ var Battery = GObject.registerClass({
             // TRANSLATORS: Estimated time until battery is empty
             // EXAMPLE: 42% (12:15 Remaining)
             return _('%d%% (%d\u2236%02d Remaining)').format(
-                Level,
+                level,
                 hours,
                 minutes
             );
@@ -110,44 +146,149 @@ var Battery = GObject.registerClass({
     }
 
     _onDestroy(actor) {
-        actor.object.disconnect(actor._interfaceAddedId);
-        actor.object.disconnect(actor._interfaceRemovedId);
-        actor.disconnect(actor._mappedId);
-
-        if (actor._batteryId && actor.battery) {
-            actor.battery.disconnect(actor._batteryId);
-        }
+        actor.device.action_group.disconnect(actor._actionAddedId);
+        actor.device.action_group.disconnect(actor._actionRemovedId);
+        actor.device.action_group.disconnect(actor._actionStateChangedId);
     }
 
-    _onInterfaceAdded(object, iface) {
-        if (iface.g_interface_name !== BATTERY_INTERFACE) return;
+    _sync() {
+        this.visible = !!this._state;
 
-        this.battery = iface;
-        gsconnect.proxyProperties(iface);
+        if (!this.visible)
+            return;
 
-        this._batteryId = this.battery.connect(
-            'g-properties-changed',
-            this._sync.bind(this)
+        this.icon.icon_name = this._state.icon_name;
+        this.label.text = (this._state.level > -1) ? `${this._state.level}%` : '';
+        this.tooltip.text = this._getBatteryLabel();
+    }
+});
+
+
+/**
+ * A cell signal strength widget with two icons
+ */
+var SignalStrength = GObject.registerClass({
+    GTypeName: 'GSConnectShellDeviceSignalStrength',
+}, class SignalStrength extends St.BoxLayout {
+
+    _init(params) {
+        super._init({
+            reactive: true,
+            style_class: 'gsconnect-device-signal-strength',
+            track_hover: true,
+        });
+        Object.assign(this, params);
+
+        // Network Type Icon
+        this.networkTypeIcon = new St.Icon({
+            fallback_icon_name: 'network-cellular-symbolic',
+            icon_size: 16,
+        });
+        this.add_child(this.networkTypeIcon);
+
+        // Signal Strength Icon
+        this.signalStrengthIcon = new St.Icon({
+            fallback_icon_name: 'network-cellular-offline-symbolic',
+            icon_size: 16,
+        });
+        this.add_child(this.signalStrengthIcon);
+
+        // Network Type Text
+        this.tooltip = new Tooltip.Tooltip({
+            parent: this,
+            text: null,
+        });
+
+        // ConnectivityReport GAction
+        this._actionAddedId = this.device.action_group.connect(
+            'action-added',
+            this._onActionChanged.bind(this)
         );
+        this._actionRemovedId = this.device.action_group.connect(
+            'action-removed',
+            this._onActionChanged.bind(this)
+        );
+        this._actionStateChangedId = this.device.action_group.connect(
+            'action-state-changed',
+            this._onStateChanged.bind(this)
+        );
+
+        this._onActionChanged(this.device.action_group, 'connectivityReport');
+
+        // Cleanup on destroy
+        this.connect('destroy', this._onDestroy);
+    }
+
+    _onActionChanged(action_group, action_name) {
+        if (action_name !== 'connectivityReport')
+            return;
+
+        if (action_group.has_action('connectivityReport')) {
+            const value = action_group.get_action_state('connectivityReport');
+            const [
+                cellular_network_type,
+                cellular_network_type_icon,
+                cellular_network_strength,
+                cellular_network_strength_icon,
+                hotspot_name,
+                hotspot_bssid,
+            ] = value.deepUnpack();
+
+            this._state = {
+                cellular_network_type: cellular_network_type,
+                cellular_network_type_icon: cellular_network_type_icon,
+                cellular_network_strength: cellular_network_strength,
+                cellular_network_strength_icon: cellular_network_strength_icon,
+                hotspot_name: hotspot_name,
+                hotspot_bssid: hotspot_bssid,
+            };
+        } else {
+            this._state = null;
+        }
 
         this._sync();
     }
 
-    _onInterfaceRemoved(object, iface) {
-        if (iface.g_interface_name === BATTERY_INTERFACE) {
-            this._batteryId = iface.disconnect(this._batteryId);
-            this.battery = null;
-        }
+    _onStateChanged(action_group, action_name, value) {
+        if (action_name !== 'connectivityReport')
+            return;
+
+        const [
+            cellular_network_type,
+            cellular_network_type_icon,
+            cellular_network_strength,
+            cellular_network_strength_icon,
+            hotspot_name,
+            hotspot_bssid,
+        ] = value.deepUnpack();
+
+        this._state = {
+            cellular_network_type: cellular_network_type,
+            cellular_network_type_icon: cellular_network_type_icon,
+            cellular_network_strength: cellular_network_strength,
+            cellular_network_strength_icon: cellular_network_strength_icon,
+            hotspot_name: hotspot_name,
+            hotspot_bssid: hotspot_bssid,
+        };
+
+        this._sync();
+    }
+
+    _onDestroy(actor) {
+        actor.device.action_group.disconnect(actor._actionAddedId);
+        actor.device.action_group.disconnect(actor._actionRemovedId);
+        actor.device.action_group.disconnect(actor._actionStateChangedId);
     }
 
     _sync() {
-        this.visible = (this.battery);
+        this.visible = !!this._state;
 
-        if (this.visible && this.mapped) {
-            this.icon.icon_name = this.battery.IconName;
-            this.label.text = (this.battery.Level > -1) ? `${this.battery.Level}%` : '';
-            this.tooltip.text = this.battery_label;
-        }
+        if (!this.visible)
+            return;
+
+        this.networkTypeIcon.icon_name = this._state.cellular_network_type_icon;
+        this.signalStrengthIcon.icon_name = this._state.cellular_network_strength_icon;
+        this.tooltip.text = this._state.cellular_network_type;
     }
 });
 
@@ -157,51 +298,50 @@ var Battery = GObject.registerClass({
  */
 var Menu = class Menu extends PopupMenu.PopupMenuSection {
 
-    _init(params) {
-        super._init();
+    constructor(params) {
+        super();
         Object.assign(this, params);
 
         this.actor.add_style_class_name('gsconnect-device-menu');
 
         // Title
-        this._title = new PopupMenu.PopupSeparatorMenuItem(this.device.Name);
+        this._title = new PopupMenu.PopupSeparatorMenuItem(this.device.name);
         this.addMenuItem(this._title);
 
         // Title -> Name
         this._title.label.style_class = 'gsconnect-device-name';
         this._title.label.clutter_text.ellipsize = 0;
-        this._nameId = this.device.settings.connect(
-            'changed::name',
-            this._onNameChanged.bind(this)
+        this.device.bind_property(
+            'name',
+            this._title.label,
+            'text',
+            GObject.BindingFlags.SYNC_CREATE
         );
-        this.actor.connect('destroy', this._onDestroy);
+
+        // Title -> Cellular Signal Strength
+        this._signalStrength = new SignalStrength({device: this.device});
+        this._title.actor.add_child(this._signalStrength);
 
         // Title -> Battery
-        this._battery = new Battery({object: this.object});
+        this._battery = new Battery({device: this.device});
         this._title.actor.add_child(this._battery);
 
         // Actions
+        let actions;
+
         if (this.menu_type === 'icon') {
-            this._actions = new GMenu.IconBox({
+            actions = new GMenu.IconBox({
                 action_group: this.device.action_group,
-                menu_model: this.device.menu_model
+                model: this.device.menu,
             });
         } else if (this.menu_type === 'list') {
-            this._actions = new GMenu.ListBox({
+            actions = new GMenu.ListBox({
                 action_group: this.device.action_group,
-                menu_model: this.device.menu_model
+                model: this.device.menu,
             });
         }
 
-        this.addMenuItem(this._actions);
-    }
-
-    _onDestroy(actor) {
-        actor._delegate.device.settings.disconnect(actor._delegate._nameId);
-    }
-
-    _onNameChanged(settings) {
-        this._title.label.text = settings.get_string('name');
+        this.addMenuItem(actions);
     }
 
     isEmpty() {
@@ -210,27 +350,30 @@ var Menu = class Menu extends PopupMenu.PopupMenuSection {
 };
 
 
-/** An indicator representing a Device in the Status Area */
-var Indicator = class Indicator extends PanelMenu.Button {
+/**
+ * An indicator representing a Device in the Status Area
+ */
+var Indicator = GObject.registerClass({
+    GTypeName: 'GSConnectDeviceIndicator',
+}, class Indicator extends PanelMenu.Button {
 
     _init(params) {
-        super._init(null, `${params.device.Name} Indicator`, false);
+        super._init(0.0, `${params.device.name} Indicator`, false);
         Object.assign(this, params);
 
         // Device Icon
-        let icon = new St.Icon({
-            gicon: new Gio.ThemedIcon({name: this.device.IconName}),
-            style_class: 'system-status-icon gsconnect-device-indicator'
+        this._icon = new St.Icon({
+            gicon: Extension.getIcon(this.device.icon_name),
+            style_class: 'system-status-icon gsconnect-device-indicator',
         });
-        this.actor.add_child(icon);
+        this.add_child(this._icon);
 
         // Menu
-        let menu = new Menu({
-            object: this.object,
+        const menu = new Menu({
             device: this.device,
-            menu_type: 'icon'
+            menu_type: 'icon',
         });
         this.menu.addMenuItem(menu);
     }
-};
+});
 

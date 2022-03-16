@@ -2,11 +2,10 @@
 
 'use strict';
 
-const Gettext = imports.gettext.domain('org.gnome.Shell.Extensions.GSConnect');
-const _ = Gettext.gettext;
-const System = imports.system;
+// Allow TLSv1.0 certificates
+// See https://github.com/GSConnect/gnome-shell-extension-gsconnect/issues/930
+imports.gi.GLib.setenv('G_TLS_GNUTLS_PRIORITY', 'NORMAL:%COMPAT:+VERS-TLS1.0', true);
 
-imports.gi.versions.Atspi = '2.0';
 imports.gi.versions.Gdk = '3.0';
 imports.gi.versions.GdkPixbuf = '2.0';
 imports.gi.versions.Gio = '2.0';
@@ -15,517 +14,161 @@ imports.gi.versions.GLib = '2.0';
 imports.gi.versions.GObject = '2.0';
 imports.gi.versions.Gtk = '3.0';
 imports.gi.versions.Pango = '1.0';
-imports.gi.versions.UPowerGlib = '1.0';
 
 const Gdk = imports.gi.Gdk;
-const GdkPixbuf = imports.gi.GdkPixbuf;
 const Gio = imports.gi.Gio;
 const GLib = imports.gi.GLib;
 const GObject = imports.gi.GObject;
 const Gtk = imports.gi.Gtk;
 
-// Find the root datadir of the extension
+
+// Bootstrap
 function get_datadir() {
-    let m = /@(.+):\d+/.exec((new Error()).stack.split('\n')[1]);
+    const m = /@(.+):\d+/.exec((new Error()).stack.split('\n')[1]);
     return Gio.File.new_for_path(m[1]).get_parent().get_parent().get_path();
 }
 
-window.gsconnect = {extdatadir: get_datadir()};
-imports.searchPath.unshift(gsconnect.extdatadir);
-imports._gsconnect;
+imports.searchPath.unshift(get_datadir());
+imports.config.PACKAGE_DATADIR = imports.searchPath[0];
+
 
 // Local Imports
-const Bluetooth = imports.service.bluetooth;
-const Core = imports.service.core;
-const Device = imports.service.device;
-const Lan = imports.service.lan;
-
+const Config = imports.config;
+const Manager = imports.service.manager;
 const ServiceUI = imports.service.ui.service;
-const Settings = imports.service.ui.settings;
-
-const _GITHUB = 'https://github.com/andyholmes/gnome-shell-extension-gsconnect';
 
 
+/**
+ * Class representing the GSConnect service daemon.
+ */
 const Service = GObject.registerClass({
     GTypeName: 'GSConnectService',
-    Properties: {
-        'devices': GObject.param_spec_variant(
-            'devices',
-            'Devices',
-            'A list of known devices',
-            new GLib.VariantType('as'),
-            null,
-            GObject.ParamFlags.READABLE
-        ),
-        'discoverable': GObject.ParamSpec.boolean(
-            'discoverable',
-            'Discoverable',
-            'Whether the service responds to discovery requests',
-            GObject.ParamFlags.READWRITE,
-            false
-        ),
-        'name': GObject.ParamSpec.string(
-            'name',
-            'deviceName',
-            'The name announced to the network',
-            GObject.ParamFlags.READWRITE,
-            'GSConnect'
-        ),
-        'type': GObject.ParamSpec.string(
-            'type',
-            'deviceType',
-            'The service device type',
-            GObject.ParamFlags.READABLE,
-            'desktop'
-        )
-    }
 }, class Service extends Gtk.Application {
 
     _init() {
         super._init({
-            application_id: gsconnect.app_id,
-            flags: Gio.ApplicationFlags.HANDLES_OPEN
+            application_id: 'org.gnome.Shell.Extensions.GSConnect',
+            flags: Gio.ApplicationFlags.HANDLES_OPEN,
+            resource_base_path: '/org/gnome/Shell/Extensions/GSConnect',
         });
 
-        // FIXME: Breaks Multi-DPI support. Remove once a Wayland protocol is
-        // created or an interface can be exported from gnome-shell process.
-        Gdk.set_allowed_backends('x11,*');
-
-        GLib.set_prgname(gsconnect.app_id);
+        GLib.set_prgname('gsconnect');
         GLib.set_application_name('GSConnect');
 
-        this.register(null);
+        // Command-line
+        this._initOptions();
     }
 
-    // Properties
-    get certificate() {
-        if (this._certificate === undefined) {
-            this._certificate = Gio.TlsCertificate.new_for_paths(
-                GLib.build_filenamev([gsconnect.configdir, 'certificate.pem']),
-                GLib.build_filenamev([gsconnect.configdir, 'private.pem'])
-            );
-        }
-
-        return this._certificate;
-    }
-
-    get devices() {
-        return Array.from(this._devices.keys());
-    }
-
-    get fingerprint() {
-        return this.certificate.fingerprint();
-    }
-
-    get identity() {
-        if (this._identity === undefined) {
-            this._identity = new Core.Packet({
-                id: 0,
-                type: 'kdeconnect.identity',
-                body: {
-                    deviceId: this.certificate.common_name,
-                    deviceName: gsconnect.settings.get_string('public-name'),
-                    deviceType: this.type,
-                    tcpPort: 1716,
-                    protocolVersion: 7,
-                    incomingCapabilities: [],
-                    outgoingCapabilities: []
-                }
+    get settings() {
+        if (this._settings === undefined) {
+            this._settings = new Gio.Settings({
+                settings_schema: Config.GSCHEMA.lookup(Config.APP_ID, true),
             });
-
-            for (let name in imports.service.plugins) {
-                // Don't report 'mousepad' support in Wayland sessions
-                if (_WAYLAND && name === 'mousepad') continue;
-
-                let meta = imports.service.plugins[name].Metadata;
-
-                if (!meta) continue;
-
-                meta.incomingCapabilities.map(type => {
-                    this._identity.body.incomingCapabilities.push(type);
-                });
-
-                meta.outgoingCapabilities.map(type => {
-                    this._identity.body.outgoingCapabilities.push(type);
-                });
-            }
         }
 
-        return this._identity;
+        return this._settings;
     }
 
-    get type() {
-        if (this._type === undefined) {
-            try {
-                let type = GLib.file_get_contents('/sys/class/dmi/id/chassis_type')[1];
-
-                if (type instanceof Uint8Array) {
-                    type = imports.byteArray.toString(type);
-                }
-
-                type = Number(type);
-                this._type = [8, 9, 10, 14].includes(type) ? 'laptop' : 'desktop';
-            } catch (e) {
-                this._type = 'desktop';
-            }
-        }
-
-        return this._type;
-    }
-
-    /**
-     * Send identity to @address or broadcast if %null
-     *
-     * @param {string|Gio.InetSocketAddress} - TCP address, bluez path or %null
-     */
-    broadcast(address = null) {
-        try {
-            switch (true) {
-                case (address instanceof Gio.InetSocketAddress):
-                    this.lan.broadcast(address);
-                    break;
-
-                case (typeof address === 'string'):
-                    this.bluetooth.broadcast(address);
-                    break;
-
-                // If not discoverable we'll only broadcast to paired devices
-                case !this.discoverable:
-                    this.reconnect();
-                    break;
-
-                // We only do true "broadcasts" for LAN
-                default:
-                    this.lan.broadcast();
-            }
-        } catch (e) {
-            logError(e);
-        }
-    }
-
-    /**
-     * Try to reconnect to each paired device that has disconnected
-     */
-    reconnect() {
-        for (let [id, device] of this._devices.entries()) {
-            if (!device.connected) {
-                if (device.paired) {
-                    device.activate();
-
-                // Prune the device if the settings window is not open
-                } else if (!this._window || !this._window.visible) {
-                    device.destroy();
-                    this._devices.delete(id);
-                    gsconnect.settings.set_strv('devices', this.devices);
-                    this.notify('devices');
-                }
-            }
-        }
-
-        return GLib.SOURCE_CONTINUE;
-    }
-
-    /**
-     * Return a device for @packet, creating it and adding it to the list of
-     * of known devices if it doesn't exist.
-     *
-     * @param {kdeconnect.identity} packet - An identity packet for the device
-     * @return {Device.Device} - A device object
-     */
-    _ensureDevice(packet) {
-        let device = this._devices.get(packet.body.deviceId);
-
-        if (device === undefined) {
-            debug(`GSConnect: Adding ${packet.body.deviceName}`);
-
-            // TODO: Remove when all clients support bluetooth-like discovery
-            //
-            // If this is the third unpaired device to connect, we disable
-            // discovery to avoid choking on networks with many devices
-            let unpaired = Array.from(this._devices.values()).filter(dev => {
-                return !dev.paired;
-            });
-
-            if (unpaired.length === 2 && this.discoverable) {
-                this.activate_action('discoverable', null);
-
-                let error = new Error();
-                error.name = 'DiscoveryWarning';
-                this.notify_error(error);
-            }
-
-            device = new Device.Device(packet);
-            this._devices.set(device.id, device);
-
-            gsconnect.settings.set_strv('devices', this.devices);
-            this.notify('devices');
-
-            device.loadPlugins();
-        }
-
-        return device;
-    }
-
-    /**
-     * Delete a known device.
-     *
-     * Removes the device from the list of known devices, unpairs it, destroys
-     * it and deletes all GSettings and cached files.
-     *
-     * @param {String} id - The id of the device to delete
-     */
-    deleteDevice(id) {
-        let device = this._devices.get(id);
-
-        if (device) {
-            // Stash the settings path before unpairing and removing
-            let settings_path = device.settings.path;
-            device.sendPacket({type: 'kdeconnect.pair', pair: 'false'});
-
-            //
-            device.destroy();
-            this._devices.delete(id);
-
-            // Delete all GSettings
-            GLib.spawn_command_line_async(`dconf reset -f ${settings_path}`);
-
-            // Delete the cache
-            let cache = GLib.build_filenamev([gsconnect.cachedir, id]);
-            Gio.File.rm_rf(cache);
-
-            // Notify
-            gsconnect.settings.set_strv('devices', this.devices);
-            this.notify('devices');
-        }
-    }
-
-    /**
-     * Service GActions
+    /*
+     * GActions
      */
     _initActions() {
-        let actions = [
-            // Device
-            ['deviceAction', this._deviceAction.bind(this), '(ssbv)'],
-
-            // App Menu
-            ['preferences', this._preferencesAction.bind(this)],
-            ['about', this._aboutAction.bind(this)],
-
-            // Misc service actions
-            ['broadcast', this.broadcast.bind(this)],
-            ['error', this._error.bind(this), 'a{ss}'],
-            ['devel', this._devel.bind(this)],
-            ['wiki', this._wiki.bind(this), 's'],
-            ['quit', () => this.quit()]
+        const actions = [
+            ['connect', this._identify.bind(this), new GLib.VariantType('s')],
+            ['device', this._device.bind(this), new GLib.VariantType('(ssbv)')],
+            ['error', this._error.bind(this), new GLib.VariantType('a{ss}')],
+            ['preferences', this._preferences, null],
+            ['quit', () => this.quit(), null],
+            ['refresh', this._identify.bind(this), null],
         ];
 
-        for (let [name, callback, type] of actions) {
-            let action = new Gio.SimpleAction({
+        for (const [name, callback, type] of actions) {
+            const action = new Gio.SimpleAction({
                 name: name,
-                parameter_type: (type) ? new GLib.VariantType(type) : null
+                parameter_type: type,
             });
             action.connect('activate', callback);
             this.add_action(action);
         }
-
-        this.add_action(gsconnect.settings.create_action('discoverable'));
     }
 
     /**
      * A wrapper for Device GActions. This is used to route device notification
      * actions to their device, since GNotifications need an 'app' level action.
      *
-     * @param {Gio.Action} action - ...
-     * @param {GLib.Variant(av)} parameter - ...
-     * @param {GLib.Variant(s)} parameter[0] - Device Id or '*' for all
-     * @param {GLib.Variant(s)} parameter[1] - GAction name
-     * @param {GLib.Variant(b)} parameter[2] - %false if the parameter is null
-     * @param {GLib.Variant(v)} parameter[3] - GAction parameter
+     * @param {Gio.Action} action - The GAction
+     * @param {GLib.Variant} parameter - The activation parameter
      */
-    _deviceAction(action, parameter) {
-        parameter = parameter.unpack();
-
-        let id = parameter[0].unpack();
-        let devices = (id === '*') ? this._devices.values() : [this._devices.get(id)];
-
-        for (let device of devices) {
-            // If the device is available
-            if (device) {
-                device.activate_action(
-                    parameter[1].unpack(),
-                    parameter[2].unpack() ? parameter[3].unpack() : null
-                );
-            }
-        }
-    }
-
-    _preferencesAction(page = null, parameter = null) {
-        if (parameter instanceof GLib.Variant) {
-            page = parameter.unpack();
-        }
-
-        if (!this._window) {
-            this._window = new Settings.Window();
-        }
-
-        // Open to a specific page
-        if (typeof page === 'string' && this._window.stack.get_child_by_name(page)) {
-            this._window._onDeviceSelected(page);
-
-        // Open the main page
-        } else {
-            this._window._onPrevious();
-        }
-
-        this._window.present();
-    }
-
-    _aboutAction() {
-        let modal = (this.get_active_window());
-        let transient_for = this.get_active_window();
-
-        if (this._about === undefined) {
-            this._about = new Gtk.AboutDialog({
-                application: this,
-                authors: [
-                    'Andy Holmes <andrew.g.r.holmes@gmail.com>',
-                    'Bertrand Lacoste <getzze@gmail.com>',
-                    'Frank Dana <ferdnyc@gmail.com>'
-                ],
-                comments: _('A complete KDE Connect implementation for GNOME'),
-                logo: GdkPixbuf.Pixbuf.new_from_resource_at_scale(
-                    gsconnect.app_path + '/icons/' + gsconnect.app_id + '.svg',
-                    128,
-                    128,
-                    true
-                ),
-                program_name: _('GSConnect'),
-                // TRANSLATORS: eg. 'Translator Name <your.email@domain.com>'
-                translator_credits: _('translator-credits'),
-                version: gsconnect.metadata.version.toString(),
-                website: gsconnect.metadata.url,
-                license_type: Gtk.License.GPL_2_0
-            });
-            this._about.connect('delete-event', () => this._about.hide_on_delete());
-        }
-
-        this._about.modal = modal;
-        this._about.transient_for = transient_for;
-        this._about.present();
-    }
-
-    _devel() {
-        (new imports.service.ui.devel.Window()).present();
-    }
-
-    _error(action, parameter) {
+    _device(action, parameter) {
         try {
-            let error = parameter.deep_unpack();
-            let dialog = new Gtk.MessageDialog({
-                text: error.message,
-                secondary_text: error.stack,
-                buttons: Gtk.ButtonsType.CLOSE,
-                message_type: Gtk.MessageType.ERROR,
-            });
-            dialog.add_button(_('Report'), Gtk.ResponseType.OK);
-            dialog.set_keep_above(true);
+            parameter = parameter.unpack();
 
-            let [message, stack] = dialog.get_message_area().get_children();
-            message.halign = Gtk.Align.START;
-            message.selectable = true;
-            stack.selectable = true;
+            // Select the appropriate device(s)
+            let devices;
+            const id = parameter[0].unpack();
 
-            dialog.connect('response', (dialog, response_id) => {
-                if (response_id === Gtk.ResponseType.OK) {
-                    let query = encodeURIComponent(dialog.text).replace('%20', '+');
-                    this._github(`issues?q=is%3Aissue+"${query}"`);
-                } else {
-                    dialog.destroy();
-                }
-            });
+            if (id === '*')
+                devices = this.manager.devices.values();
+            else
+                devices = [this.manager.devices.get(id)];
 
-            dialog.show();
+            // Unpack the action data and activate the action
+            const name = parameter[1].unpack();
+            const target = parameter[2].unpack() ? parameter[3].unpack() : null;
+
+            for (const device of devices)
+                device.activate_action(name, target);
         } catch (e) {
             logError(e);
         }
     }
 
-    _wiki(action, parameter) {
-        this._github(`wiki/${parameter.unpack()}`);
-    }
+    _error(action, parameter) {
+        try {
+            const error = parameter.deepUnpack();
 
-    _github(path = []) {
-        let uri = [_GITHUB].concat(path.split('/')).join('/');
-
-        Gio.AppInfo.launch_default_for_uri_async(uri, null, null, (src, res) => {
-            try {
-                Gio.AppInfo.launch_default_for_uri_finish(res);
-            } catch (e) {
-                logError(e);
+            // If there's a URL, we have better information in the Wiki
+            if (error.url !== undefined) {
+                Gio.AppInfo.launch_default_for_uri_async(
+                    error.url,
+                    null,
+                    null,
+                    null
+                );
+                return;
             }
-        });
+
+            const dialog = new ServiceUI.ErrorDialog(error);
+            dialog.present();
+        } catch (e) {
+            logError(e);
+        }
     }
 
-    /**
-     * Override Gio.Application.send_notification() to respect donotdisturb
-     */
-    send_notification(id, notification) {
-        if (!this._notificationSettings) {
-            this._notificationSettings = new Gio.Settings({
-                schema_id: 'org.gnome.desktop.notifications.application',
-                path: '/org/gnome/desktop/notifications/application/org-gnome-shell-extensions-gsconnect/'
-            });
+    _identify(action, parameter) {
+        try {
+            let uri = null;
+
+            if (parameter instanceof GLib.Variant)
+                uri = parameter.unpack();
+
+            this.manager.identify(uri);
+        } catch (e) {
+            logError(e);
         }
-
-        let now = GLib.DateTime.new_now_local().to_unix();
-        let dnd = (gsconnect.settings.get_int('donotdisturb') <= now);
-
-        // TODO: Maybe the 'enable-sound-alerts' should be left alone/queried
-        this._notificationSettings.set_boolean('enable-sound-alerts', dnd);
-        this._notificationSettings.set_boolean('show-banners', dnd);
-
-        super.send_notification(id, notification);
     }
 
-    /**
-     * Remove a local libnotify or Gtk notification.
-     *
-     * @param {String|Number} id - Gtk (string) or libnotify id (uint32)
-     * @param {String|null} application - Application Id if Gtk or null
-     */
-    remove_notification(id, application = null) {
-        let name, path, method, variant;
-
-        if (application !== null) {
-            name = 'org.gtk.Notifications';
-            method = 'RemoveNotification';
-            path = '/org/gtk/Notifications';
-            variant = new GLib.Variant('(ss)', [application, id]);
-        } else {
-            name = 'org.freedesktop.Notifications';
-            path = '/org/freedesktop/Notifications';
-            method = 'CloseNotification';
-            variant = new GLib.Variant('(u)', [id]);
-        }
-
-        Gio.DBus.session.call(
-            name, path, name, method, variant, null,
-            Gio.DBusCallFlags.NONE, -1, null,
-            (connection, res) => {
-                try {
-                    connection.call_finish(res);
-                } catch (e) {
-                    logError(e);
-                }
-            }
+    _preferences() {
+        Gio.Subprocess.new(
+            [`${Config.PACKAGE_DATADIR}/gsconnect-preferences`],
+            Gio.SubprocessFlags.NONE
         );
     }
 
     /**
      * Report a service-level error
      *
-     * @param {object} error - An Error or object with name, message and stack
-     * @param {string} context - The scope of the error
+     * @param {Object} error - An Error or object with name, message and stack
      */
     notify_error(error) {
         try {
@@ -533,109 +176,51 @@ const Service = GObject.registerClass({
             logError(error);
 
             // Create an new notification
-            let id, title, body, icon, time;
-            let notif = new Gio.Notification();
-            notif.set_priority(Gio.NotificationPriority.URGENT);
+            let id, body, priority;
+            const notif = new Gio.Notification();
+            const icon = new Gio.ThemedIcon({name: 'dialog-error'});
+            let target = null;
 
-            switch (error.name) {
-                // A TLS certificate failure
-                case 'AuthenticationError':
-                    id = `${Date.now()}`;
-                    title = _('Authentication Failure');
-                    time = GLib.DateTime.new_now_local().format('%F %R');
-                    body = `"${error.deviceName}"@${error.deviceHost} (${time})`;
-                    icon = new Gio.ThemedIcon({name: 'dialog-error'});
-                    break;
+            if (error.name === undefined)
+                error.name = 'Error';
 
-                case 'LanError':
-                case 'ProxyError':
-                    id = error.name;
-                    title = _('Network Error');
-                    body = error.message + '\n\n' + _('Click for help troubleshooting');
-                    icon = new Gio.ThemedIcon({name: 'network-error'});
-                    notif.set_default_action(`app.wiki('Help#${error.name}')`);
-                    break;
+            if (error.url !== undefined) {
+                id = error.url;
+                body = _('Click for help troubleshooting');
+                priority = Gio.NotificationPriority.URGENT;
 
-                case 'GvcError':
-                    id = error.name;
-                    title = _('PulseAudio Error');
-                    body = _('Click for help troubleshooting');
-                    icon = new Gio.ThemedIcon({name: 'dialog-error'});
-                    notif.set_default_action(`app.wiki('Help#${error.name}')`);
-                    break;
+                target = new GLib.Variant('a{ss}', {
+                    name: error.name.trim(),
+                    message: error.message.trim(),
+                    stack: error.stack.trim(),
+                    url: error.url,
+                });
+            } else {
+                id = error.message.trim();
+                body = _('Click for more information');
+                priority = Gio.NotificationPriority.HIGH;
 
-                case 'DiscoveryWarning':
-                    id = 'discovery-warning';
-                    title = _('Discovery Disabled');
-                    body = _('Discovery has been disabled due to the number of devices on this network.');
-                    icon = new Gio.ThemedIcon({name: 'dialog-warning'});
-                    notif.set_default_action('app.preferences');
-                    notif.set_priority(Gio.NotificationPriority.NORMAL);
-                    break;
-
-                case 'PluginError':
-                    id = `${error.plugin}-error`;
-                    title = _('%s Plugin Failed To Load').format(error.label);
-                    body = error.message + '\n\n' + _('Click for more information');
-                    icon = new Gio.ThemedIcon({name: 'dialog-error'});
-
-                    error = new GLib.Variant('a{ss}', {
-                        name: error.name.trim(),
-                        message: error.message.trim(),
-                        stack: error.stack.trim()
-                    });
-
-                    notif.set_default_action_and_target('app.error', error);
-                    notif.set_priority(Gio.NotificationPriority.HIGH);
-                    break;
-
-                default:
-                    id = `${Date.now()}`;
-                    title = error.name;
-                    body = error.message.trim();
-                    icon = new Gio.ThemedIcon({name: 'dialog-error'});
-                    error = new GLib.Variant('a{ss}', {
-                        name: error.name,
-                        message: error.message,
-                        stack: error.stack
-                    });
-                    notif.set_default_action_and_target('app.error', error);
-                    notif.set_priority(Gio.NotificationPriority.HIGH);
+                target = new GLib.Variant('a{ss}', {
+                    name: error.name.trim(),
+                    message: error.message.trim(),
+                    stack: error.stack.trim(),
+                });
             }
 
-            // Create an urgent notification
-            notif.set_title(_('GSConnect: %s').format(title));
+            notif.set_title(`GSConnect: ${error.name.trim()}`);
             notif.set_body(body);
             notif.set_icon(icon);
+            notif.set_priority(priority);
+            notif.set_default_action_and_target('app.error', target);
 
-            // Bypass override
-            super.send_notification(id, notif);
+            this.send_notification(id, notif);
         } catch (e) {
             logError(e);
         }
     }
 
-    /**
-     * Load each script in components/ and instantiate a Service if it has one
-     */
-    _loadComponents() {
-        for (let name in imports.service.components) {
-            try {
-                let module = imports.service.components[name];
-
-                if (module.hasOwnProperty('Service')) {
-                    this[name] = new module.Service();
-                }
-            } catch (e) {
-                this.notify_error(e);
-            }
-        }
-    }
-
     vfunc_activate() {
-        // TODO: this causes problems right now because the bluetooth service
-        // clobbers open TCP channels sometimes, and this gets called often
-        //this.broadcast();
+        super.vfunc_activate();
     }
 
     vfunc_startup() {
@@ -645,107 +230,56 @@ const Service = GObject.registerClass({
 
         // Watch *this* file and stop the service if it's updated/uninstalled
         this._serviceMonitor = Gio.File.new_for_path(
-            gsconnect.extdatadir + '/service/daemon.js'
-        ).monitor(
-            Gio.FileMonitorFlags.WATCH_MOVES,
-            null
-        );
+            `${Config.PACKAGE_DATADIR}/service/daemon.js`
+        ).monitor(Gio.FileMonitorFlags.WATCH_MOVES, null);
         this._serviceMonitor.connect('changed', () => this.quit());
 
         // Init some resources
-        let provider = new Gtk.CssProvider();
-        provider.load_from_resource(gsconnect.app_path + '/application.css');
+        const provider = new Gtk.CssProvider();
+        provider.load_from_resource(`${Config.APP_PATH}/application.css`);
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(),
             provider,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         );
 
-        // Ensure out handlers are registered
-        let appInfo = Gio.DesktopAppInfo.new(`${gsconnect.app_id}.desktop`);
-        appInfo.add_supports_type('x-scheme-handler/sms');
-        appInfo.add_supports_type('x-scheme-handler/tel');
+        // Ensure our handlers are registered
+        try {
+            const appInfo = Gio.DesktopAppInfo.new(`${Config.APP_ID}.desktop`);
+            appInfo.add_supports_type('x-scheme-handler/sms');
+            appInfo.add_supports_type('x-scheme-handler/tel');
+        } catch (e) {
+            debug(e);
+        }
 
-        // Properties
-        gsconnect.settings.bind(
-            'discoverable',
-            this,
-            'discoverable',
-            Gio.SettingsBindFlags.DEFAULT
-        );
-
-        gsconnect.settings.bind(
-            'public-name',
-            this,
-            'name',
-            Gio.SettingsBindFlags.DEFAULT
-        );
-
-        // Keep identity updated and broadcast any name changes
-        gsconnect.settings.connect('changed::public-name', (settings) => {
-            this.identity.body.deviceName = this.name;
-        });
-
-        // GActions
+        // GActions & GSettings
         this._initActions();
 
-        // Components (PulseAudio, UPower, etc)
-        this._loadComponents();
-
-        // Track devices with id as key
-        this._devices = new Map();
-
-        // Load cached devices
-        let cached = gsconnect.settings.get_strv('devices');
-        debug(`Loading ${cached.length} device(s) from cache`);
-        cached.map(id => {
-            let device = new Device.Device({body: {deviceId: id}});
-            this._devices.set(device.id, device);
-            device.loadPlugins();
-        });
-        this.notify('devices');
-
-        // Lan.ChannelService
-        try {
-            this.lan = new Lan.ChannelService();
-        } catch (e) {
-            e.name = 'LanError';
-            this.notify_error(e);
-        }
-
-        // Bluetooth.ChannelService
-        try {
-            //this.bluetooth = new Bluetooth.ChannelService();
-        } catch (e) {
-            if (this.bluetooth) {
-                this.bluetooth.destroy();
-            }
-        }
-
-        GLib.timeout_add_seconds(300, 5, this.reconnect.bind(this));
+        this.manager.start();
     }
 
     vfunc_dbus_register(connection, object_path) {
-        try {
-            super.vfunc_dbus_register(connection, object_path);
-        } catch (e) {
+        if (!super.vfunc_dbus_register(connection, object_path))
             return false;
-        }
 
-        // org.freedesktop.ObjectManager interface; only devices currently
-        this.objectManager = new Gio.DBusObjectManagerServer({
+        this.manager = new Manager.Manager({
             connection: connection,
-            object_path: object_path
+            object_path: object_path,
         });
 
         return true;
     }
 
+    vfunc_dbus_unregister(connection, object_path) {
+        this.manager.destroy();
+
+        super.vfunc_dbus_unregister(connection, object_path);
+    }
+
     vfunc_open(files, hint) {
         super.vfunc_open(files, hint);
 
-        for (let file of files) {
-            let devices = [];
+        for (const file of files) {
             let action, parameter, title;
 
             try {
@@ -765,70 +299,430 @@ const Service = GObject.registerClass({
                     case 'file':
                         title = _('Share File');
                         action = 'shareFile';
-                        parameter = new GLib.Variant('(sb)', file.get_uri(), false);
+                        parameter = new GLib.Variant('(sb)', [file.get_uri(), false]);
                         break;
 
                     default:
-                        logWarning(`Unsupported URI: ${file.get_uri()}`);
-                        return;
+                        throw new Error(`Unsupported URI: ${file.get_uri()}`);
                 }
 
-                // Find supporting devices
-                for (let device of this._devices.values()) {
-                    if (device.get_action_enabled(action)) {
-                        devices.push(device);
-                    }
-                }
-
-                //
-                switch (devices.length) {
-                    case 0:
-                        logWarning(`Unsupported action: ${action}`);
-                        break;
-
-                    case 1:
-                        devices[0].activate_action(action, parameter);
-                        break;
-
-                    default:
-                        new ServiceUI.DeviceChooserDialog({
-                            title: title,
-                            devices: devices,
-                            action: action,
-                            parameter: parameter
-                        });
-                }
+                // Show chooser dialog
+                new ServiceUI.DeviceChooser({
+                    title: title,
+                    action_name: action,
+                    action_target: parameter,
+                });
             } catch (e) {
-                logError(e, `GSConnect: Opening ${file.get_uri()}:`);
+                logError(e, `GSConnect: Opening ${file.get_uri()}`);
             }
         }
     }
 
     vfunc_shutdown() {
+        // Dispose GSettings
+        if (this._settings !== undefined)
+            this.settings.run_dispose();
+
+        this.manager.stop();
+
+        // Exhaust the event loop to ensure any pending operations complete
+        const context = GLib.MainContext.default();
+
+        while (context.iteration(false))
+            continue;
+
+        // Force a GC to prevent any more calls back into JS, then chain-up
+        imports.system.gc();
         super.vfunc_shutdown();
+    }
 
-        // Destroy the channel providers first to avoid any further connections
-        if (this.lan) {
-            this.lan.destroy();
+    /*
+     * CLI
+     */
+    _initOptions() {
+        /*
+         * Device Listings
+         */
+        this.add_main_option(
+            'list-devices',
+            'l'.charCodeAt(0),
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.NONE,
+            _('List available devices'),
+            null
+        );
+
+        this.add_main_option(
+            'list-all',
+            'a'.charCodeAt(0),
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.NONE,
+            _('List all devices'),
+            null
+        );
+
+        this.add_main_option(
+            'device',
+            'd'.charCodeAt(0),
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.STRING,
+            _('Target Device'),
+            '<device-id>'
+        );
+
+        /**
+         * Pairing
+         */
+        this.add_main_option(
+            'pair',
+            0,
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.NONE,
+            _('Pair'),
+            null
+        );
+
+        this.add_main_option(
+            'unpair',
+            0,
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.NONE,
+            _('Unpair'),
+            null
+        );
+
+        /*
+         * Messaging
+         */
+        this.add_main_option(
+            'message',
+            0,
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.STRING_ARRAY,
+            _('Send SMS'),
+            '<phone-number>'
+        );
+
+        this.add_main_option(
+            'message-body',
+            0,
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.STRING,
+            _('Message Body'),
+            '<text>'
+        );
+
+        /*
+         * Notifications
+         */
+        this.add_main_option(
+            'notification',
+            0,
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.STRING,
+            _('Send Notification'),
+            '<title>'
+        );
+
+        this.add_main_option(
+            'notification-appname',
+            0,
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.STRING,
+            _('Notification App Name'),
+            '<name>'
+        );
+
+        this.add_main_option(
+            'notification-body',
+            0,
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.STRING,
+            _('Notification Body'),
+            '<text>'
+        );
+
+        this.add_main_option(
+            'notification-icon',
+            0,
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.STRING,
+            _('Notification Icon'),
+            '<icon-name>'
+        );
+
+        this.add_main_option(
+            'notification-id',
+            0,
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.STRING,
+            _('Notification ID'),
+            '<id>'
+        );
+
+        this.add_main_option(
+            'photo',
+            0,
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.NONE,
+            _('Photo'),
+            null
+        );
+
+        this.add_main_option(
+            'ping',
+            0,
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.NONE,
+            _('Ping'),
+            null
+        );
+
+        this.add_main_option(
+            'ring',
+            0,
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.NONE,
+            _('Ring'),
+            null
+        );
+
+        /*
+         * Sharing
+         */
+        this.add_main_option(
+            'share-file',
+            0,
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.FILENAME_ARRAY,
+            _('Share File'),
+            '<filepath|URI>'
+        );
+
+        this.add_main_option(
+            'share-link',
+            0,
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.STRING_ARRAY,
+            _('Share Link'),
+            '<URL>'
+        );
+
+        this.add_main_option(
+            'share-text',
+            0,
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.STRING,
+            _('Share Text'),
+            '<text>'
+        );
+
+        /*
+         * Misc
+         */
+        this.add_main_option(
+            'version',
+            'v'.charCodeAt(0),
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.NONE,
+            _('Show release version'),
+            null
+        );
+    }
+
+    _cliAction(id, name, parameter = null) {
+        const parameters = [];
+
+        if (parameter instanceof GLib.Variant)
+            parameters[0] = parameter;
+
+        id = id.replace(/\W+/g, '_');
+
+        Gio.DBus.session.call_sync(
+            'org.gnome.Shell.Extensions.GSConnect',
+            `/org/gnome/Shell/Extensions/GSConnect/Device/${id}`,
+            'org.gtk.Actions',
+            'Activate',
+            GLib.Variant.new('(sava{sv})', [name, parameters, {}]),
+            null,
+            Gio.DBusCallFlags.NONE,
+            -1,
+            null
+        );
+    }
+
+    _cliListDevices(full = true) {
+        const result = Gio.DBus.session.call_sync(
+            'org.gnome.Shell.Extensions.GSConnect',
+            '/org/gnome/Shell/Extensions/GSConnect',
+            'org.freedesktop.DBus.ObjectManager',
+            'GetManagedObjects',
+            null,
+            null,
+            Gio.DBusCallFlags.NONE,
+            -1,
+            null
+        );
+
+        const variant = result.unpack()[0].unpack();
+        let device;
+
+        for (let object of Object.values(variant)) {
+            object = object.recursiveUnpack();
+            device = object['org.gnome.Shell.Extensions.GSConnect.Device'];
+
+            if (full)
+                print(`${device.Id}\t${device.Name}\t${device.Connected}\t${device.Paired}`);
+            else if (device.Connected && device.Paired)
+                print(device.Id);
+        }
+    }
+
+    _cliMessage(id, options) {
+        if (!options.contains('message-body'))
+            throw new TypeError('missing --message-body option');
+
+        // TODO: currently we only support single-recipient messaging
+        const addresses = options.lookup_value('message', null).deepUnpack();
+        const body = options.lookup_value('message-body', null).deepUnpack();
+
+        this._cliAction(
+            id,
+            'sendSms',
+            GLib.Variant.new('(ss)', [addresses[0], body])
+        );
+    }
+
+    _cliNotify(id, options) {
+        const title = options.lookup_value('notification', null).unpack();
+        let body = '';
+        let icon = null;
+        let nid = `${Date.now()}`;
+        let appName = 'GSConnect CLI';
+
+        if (options.contains('notification-id'))
+            nid = options.lookup_value('notification-id', null).unpack();
+
+        if (options.contains('notification-body'))
+            body = options.lookup_value('notification-body', null).unpack();
+
+        if (options.contains('notification-appname'))
+            appName = options.lookup_value('notification-appname', null).unpack();
+
+        if (options.contains('notification-icon')) {
+            icon = options.lookup_value('notification-icon', null).unpack();
+            icon = Gio.Icon.new_for_string(icon);
+        } else {
+            icon = new Gio.ThemedIcon({
+                name: 'org.gnome.Shell.Extensions.GSConnect',
+            });
         }
 
-        if (this.bluetooth) {
-            this.bluetooth.destroy();
+        const notification = new GLib.Variant('a{sv}', {
+            appName: GLib.Variant.new_string(appName),
+            id: GLib.Variant.new_string(nid),
+            title: GLib.Variant.new_string(title),
+            text: GLib.Variant.new_string(body),
+            ticker: GLib.Variant.new_string(`${title}: ${body}`),
+            time: GLib.Variant.new_string(`${Date.now()}`),
+            isClearable: GLib.Variant.new_boolean(true),
+            icon: icon.serialize(),
+        });
+
+        this._cliAction(id, 'sendNotification', notification);
+    }
+
+    _cliShareFile(device, options) {
+        const files = options.lookup_value('share-file', null).deepUnpack();
+
+        for (let file of files) {
+            file = imports.byteArray.toString(file);
+            this._cliAction(device, 'shareFile', GLib.Variant.new('(sb)', [file, false]));
         }
+    }
 
-        // This must be done before ::dbus-unregister is emitted
-        this._devices.forEach(device => device.destroy());
+    _cliShareLink(device, options) {
+        const uris = options.lookup_value('share-link', null).unpack();
 
-        // Destroy the remaining components last
-        if (this.mpris) {
-            this.mpris.destroy();
-        }
+        for (const uri of uris)
+            this._cliAction(device, 'shareUri', uri);
+    }
 
-        if (this.notification) {
-            this.notification.destroy();
+    _cliShareText(device, options) {
+        const text = options.lookup_value('share-text', null).unpack();
+
+        this._cliAction(device, 'shareText', GLib.Variant.new_string(text));
+    }
+
+    vfunc_handle_local_options(options) {
+        try {
+            if (options.contains('version')) {
+                print(`GSConnect ${Config.PACKAGE_VERSION}`);
+                return 0;
+            }
+
+            this.register(null);
+
+            if (options.contains('list-devices')) {
+                this._cliListDevices(false);
+                return 0;
+            }
+
+            if (options.contains('list-all')) {
+                this._cliListDevices(true);
+                return 0;
+            }
+
+            // We need a device for anything else; exit since this is probably
+            // the daemon being started.
+            if (!options.contains('device'))
+                return -1;
+
+            const id = options.lookup_value('device', null).unpack();
+
+            // Pairing
+            if (options.contains('pair')) {
+                this._cliAction(id, 'pair');
+                return 0;
+            }
+
+            if (options.contains('unpair')) {
+                this._cliAction(id, 'unpair');
+                return 0;
+            }
+
+            // Plugins
+            if (options.contains('message'))
+                this._cliMessage(id, options);
+
+            if (options.contains('notification'))
+                this._cliNotify(id, options);
+
+            if (options.contains('photo'))
+                this._cliAction(id, 'photo');
+
+            if (options.contains('ping'))
+                this._cliAction(id, 'ping', GLib.Variant.new_string(''));
+
+            if (options.contains('ring'))
+                this._cliAction(id, 'ring');
+
+            if (options.contains('share-file'))
+                this._cliShareFile(id, options);
+
+            if (options.contains('share-link'))
+                this._cliShareLink(id, options);
+
+            if (options.contains('share-text'))
+                this._cliShareText(id, options);
+
+            return 0;
+        } catch (e) {
+            logError(e);
+            return 1;
         }
     }
 });
 
-(new Service()).run([System.programInvocationName].concat(ARGV));
+(new Service()).run([imports.system.programInvocationName].concat(ARGV));
 

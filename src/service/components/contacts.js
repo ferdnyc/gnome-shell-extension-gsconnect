@@ -1,9 +1,25 @@
 'use strict';
 
-const GdkPixbuf = imports.gi.GdkPixbuf;
+const ByteArray = imports.byteArray;
+
 const Gio = imports.gi.Gio;
 const GLib = imports.gi.GLib;
 const GObject = imports.gi.GObject;
+
+const Config = imports.config;
+
+var HAVE_EDS = true;
+var EBook = null;
+var EBookContacts = null;
+var EDataServer = null;
+
+try {
+    EBook = imports.gi.EBook;
+    EBookContacts = imports.gi.EBookContacts;
+    EDataServer = imports.gi.EDataServer;
+} catch (e) {
+    HAVE_EDS = false;
+}
 
 
 /**
@@ -12,112 +28,368 @@ const GObject = imports.gi.GObject;
 var Store = GObject.registerClass({
     GTypeName: 'GSConnectContactsStore',
     Properties: {
-        'contacts': GObject.param_spec_variant(
-            'contacts',
-            'ContactsList',
-            'A list of cached contacts',
-            new GLib.VariantType('a{sv}'),
-            null,
-            GObject.ParamFlags.READABLE
-        ),
         'context': GObject.ParamSpec.string(
             'context',
             'Context',
-            'Used as the cache directory, relative to gsconnect.cachedir',
-            GObject.ParamFlags.READWRITE,
-            ''
-        )
-    }
+            'Used as the cache directory, relative to Config.CACHEDIR',
+            GObject.ParamFlags.CONSTRUCT_ONLY | GObject.ParamFlags.READWRITE,
+            null
+        ),
+    },
+    Signals: {
+        'contact-added': {
+            flags: GObject.SignalFlags.RUN_FIRST,
+            param_types: [GObject.TYPE_STRING],
+        },
+        'contact-removed': {
+            flags: GObject.SignalFlags.RUN_FIRST,
+            param_types: [GObject.TYPE_STRING],
+        },
+        'contact-changed': {
+            flags: GObject.SignalFlags.RUN_FIRST,
+            param_types: [GObject.TYPE_STRING],
+        },
+    },
 }, class Store extends GObject.Object {
 
-    _init(params) {
-        super._init(Object.assign({
-            context: null
-        }, params));
+    _init(context = null) {
+        super._init({
+            context: context,
+        });
 
-        this.__cache_data = {};
-
-        // Asynchronous setup
-        this._init_async();
+        this._cacheData = {};
+        this._edsPrepared = false;
     }
 
-    async _init_async() {
+    /**
+     * Parse an EContact and add it to the store.
+     *
+     * @param {EBookContacts.Contact} econtact - an EContact to parse
+     * @param {string} [origin] - an optional origin string
+     */
+    async _parseEContact(econtact, origin = 'desktop') {
         try {
-            this.__cache_data = await JSON.load(this.__cache_file);
-        } catch (e) {
-            logWarning(e);
-            this.__cache_data = {};
-        } finally {
-            this.connect('notify::contacts', this.__cache_write.bind(this));
+            const contact = {
+                id: econtact.id,
+                name: _('Unknown Contact'),
+                numbers: [],
+                origin: origin,
+                timestamp: 0,
+            };
 
-            if (this.context === null) {
-                // Create a re-usable launcher for folks.py
-                this._launcher = new Gio.SubprocessLauncher({
-                    flags: Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
-                });
-                this._launcher.setenv('FOLKS_BACKENDS_DISABLED', 'telepathy', true);
+            // Try to get a contact name
+            if (econtact.full_name)
+                contact.name = econtact.full_name;
 
-                this._loadFolks();
+            // Parse phone numbers
+            const nums = econtact.get_attributes(EBookContacts.ContactField.TEL);
+
+            for (const attr of nums) {
+                const number = {
+                    value: attr.get_value(),
+                    type: 'unknown',
+                };
+
+                if (attr.has_type('CELL'))
+                    number.type = 'cell';
+                else if (attr.has_type('HOME'))
+                    number.type = 'home';
+                else if (attr.has_type('WORK'))
+                    number.type = 'work';
+
+                contact.numbers.push(number);
             }
+
+            // Try and get a contact photo
+            const photo = econtact.photo;
+
+            if (photo) {
+                if (photo.type === EBookContacts.ContactPhotoType.INLINED) {
+                    const data = photo.get_inlined()[0];
+                    contact.avatar = await this.storeAvatar(data);
+
+                } else if (photo.type === EBookContacts.ContactPhotoType.URI) {
+                    const uri = econtact.photo.get_uri();
+                    contact.avatar = uri.replace('file://', '');
+                }
+            }
+
+            this.add(contact, false);
+        } catch (e) {
+            logError(e, `Failed to parse VCard contact ${econtact.id}`);
         }
     }
 
-    async __cache_write() {
+    /*
+     * EDS Helpers
+     */
+    _getEBookClient(source, cancellable = null) {
+        return new Promise((resolve, reject) => {
+            EBook.BookClient.connect(source, 0, cancellable, (source, res) => {
+                try {
+                    resolve(EBook.BookClient.connect_finish(res));
+                } catch (e) {
+                    reject(e);
+                }
+            });
+        });
+    }
+
+    _getEBookView(client, query = '', cancellable = null) {
+        return new Promise((resolve, reject) => {
+            client.get_view(query, cancellable, (client, res) => {
+                try {
+                    resolve(client.get_view_finish(res)[1]);
+                } catch (e) {
+                    reject(e);
+                }
+            });
+        });
+    }
+
+    _getEContacts(client, query = '', cancellable = null) {
+        return new Promise((resolve, reject) => {
+            client.get_contacts(query, cancellable, (client, res) => {
+                try {
+                    resolve(client.get_contacts_finish(res)[1]);
+                } catch (e) {
+                    debug(e);
+                    resolve([]);
+                }
+            });
+        });
+    }
+
+    _getESourceRegistry(cancellable = null) {
+        return new Promise((resolve, reject) => {
+            EDataServer.SourceRegistry.new(cancellable, (registry, res) => {
+                try {
+                    resolve(EDataServer.SourceRegistry.new_finish(res));
+                } catch (e) {
+                    reject(e);
+                }
+            });
+        });
+    }
+
+    /*
+     * AddressBook DBus callbacks
+     */
+    _onObjectsAdded(connection, sender, path, iface, signal, params) {
         try {
-            if (this.__cache_lock) {
-                this.__cache_queue = true;
-                return;
-            }
+            const adds = params.get_child_value(0).get_strv();
 
-            this.__cache_lock = true;
-            await JSON.dump(this.__cache_data, this.__cache_file);
+            // NOTE: sequential pairs of vcard, id
+            for (let i = 0, len = adds.length; i < len; i += 2) {
+                try {
+                    const vcard = adds[i];
+                    const econtact = EBookContacts.Contact.new_from_vcard(vcard);
+                    this._parseEContact(econtact);
+                } catch (e) {
+                    debug(e);
+                }
+            }
         } catch (e) {
-            logWarning(e);
-        } finally {
-            this.__cache_lock = false;
+            debug(e);
+        }
+    }
 
-            if (this.__cache_queue) {
-                this.__cache_queue = false;
-                this.__cache_write();
+    _onObjectsRemoved(connection, sender, path, iface, signal, params) {
+        try {
+            const changes = params.get_child_value(0).get_strv();
+
+            for (const id of changes) {
+                try {
+                    this.remove(id, false);
+                } catch (e) {
+                    debug(e);
+                }
             }
+        } catch (e) {
+            debug(e);
+        }
+    }
+
+    _onObjectsModified(connection, sender, path, iface, signal, params) {
+        try {
+            const changes = params.get_child_value(0).get_strv();
+
+            // NOTE: sequential pairs of vcard, id
+            for (let i = 0, len = changes.length; i < len; i += 2) {
+                try {
+                    const vcard = changes[i];
+                    const econtact = EBookContacts.Contact.new_from_vcard(vcard);
+                    this._parseEContact(econtact);
+                } catch (e) {
+                    debug(e);
+                }
+            }
+        } catch (e) {
+            debug(e);
+        }
+    }
+
+    /*
+     * SourceRegistryWatcher callbacks
+     */
+    async _onAppeared(watcher, source) {
+        try {
+            // Get an EBookClient and EBookView
+            const uid = source.get_uid();
+            const client = await this._getEBookClient(source);
+            const view = await this._getEBookView(client, 'exists "tel"');
+
+            // Watch the view for changes to the address book
+            const connection = view.get_connection();
+            const objectPath = view.get_object_path();
+
+            view._objectsAddedId = connection.signal_subscribe(
+                null,
+                'org.gnome.evolution.dataserver.AddressBookView',
+                'ObjectsAdded',
+                objectPath,
+                null,
+                Gio.DBusSignalFlags.NONE,
+                this._onObjectsAdded.bind(this)
+            );
+
+            view._objectsRemovedId = connection.signal_subscribe(
+                null,
+                'org.gnome.evolution.dataserver.AddressBookView',
+                'ObjectsRemoved',
+                objectPath,
+                null,
+                Gio.DBusSignalFlags.NONE,
+                this._onObjectsRemoved.bind(this)
+            );
+
+            view._objectsModifiedId = connection.signal_subscribe(
+                null,
+                'org.gnome.evolution.dataserver.AddressBookView',
+                'ObjectsModified',
+                objectPath,
+                null,
+                Gio.DBusSignalFlags.NONE,
+                this._onObjectsModified.bind(this)
+            );
+
+            view.start();
+
+            // Store the EBook in a map
+            this._ebooks.set(uid, {
+                source: source,
+                client: client,
+                view: view,
+            });
+        } catch (e) {
+            debug(e);
+        }
+    }
+
+    _onDisappeared(watcher, source) {
+        try {
+            const uid = source.get_uid();
+            const ebook = this._ebooks.get(uid);
+
+            if (ebook === undefined)
+                return;
+
+            // Disconnect the EBookView
+            if (ebook.view) {
+                const connection = ebook.view.get_connection();
+                connection.signal_unsubscribe(ebook.view._objectsAddedId);
+                connection.signal_unsubscribe(ebook.view._objectsRemovedId);
+                connection.signal_unsubscribe(ebook.view._objectsModifiedId);
+
+                ebook.view.stop();
+            }
+
+            this._ebooks.delete(uid);
+        } catch (e) {
+            debug(e);
+        }
+    }
+
+    async _initEvolutionDataServer() {
+        try {
+            if (this._edsPrepared)
+                return;
+
+            this._edsPrepared = true;
+            this._ebooks = new Map();
+
+            // Get the current EBooks
+            const registry = await this._getESourceRegistry();
+
+            for (const source of registry.list_sources('Address Book'))
+                await this._onAppeared(null, source);
+
+            // Watch for new and removed sources
+            this._watcher = new EDataServer.SourceRegistryWatcher({
+                registry: registry,
+                extension_name: 'Address Book',
+            });
+
+            this._appearedId = this._watcher.connect(
+                'appeared',
+                this._onAppeared.bind(this)
+            );
+            this._disappearedId = this._watcher.connect(
+                'disappeared',
+                this._onDisappeared.bind(this)
+            );
+        } catch (e) {
+            const service = Gio.Application.get_default();
+
+            if (service !== null)
+                service.notify_error(e);
+            else
+                logError(e);
         }
     }
 
     *[Symbol.iterator]() {
-        for (let contact of Object.values(this.__cache_data)) {
-            yield contact;
-        }
+        const contacts = Object.values(this._cacheData);
+
+        for (let i = 0, len = contacts.length; i < len; i++)
+            yield contacts[i];
+    }
+
+    get contacts() {
+        return Object.values(this._cacheData);
     }
 
     get context() {
-        return this._context || null;
+        if (this._context === undefined)
+            this._context = null;
+
+        return this._context;
     }
 
     set context(context) {
-        if (!context) {
-            this._context = null;
-            this.__cache_dir = Gio.File.new_for_path(gsconnect.cachedir);
-        } else {
-            this._context = context;
-            this.__cache_dir = Gio.File.new_for_path(
-                GLib.build_filenamev([gsconnect.cachedir, context])
-            );
-        }
+        this._context = context;
+        this._cacheDir = Gio.File.new_for_path(Config.CACHEDIR);
 
-        GLib.mkdir_with_parents(this.__cache_dir.get_path(), 448);
-        this.__cache_file = this.__cache_dir.get_child('contacts.json');
+        if (context !== null)
+            this._cacheDir = this._cacheDir.get_child(context);
+
+        GLib.mkdir_with_parents(this._cacheDir.get_path(), 448);
+        this._cacheFile = this._cacheDir.get_child('contacts.json');
     }
 
     /**
      * Save a ByteArray to file and return the path
      *
      * @param {ByteArray} contents - An image ByteArray
-     * @return {string} - Path the the avatar file
+     * @return {string|undefined} File path or %undefined on failure
      */
-    setAvatarContents(contents) {
+    storeAvatar(contents) {
         return new Promise((resolve, reject) => {
-            let md5 = GLib.compute_checksum_for_data(GLib.ChecksumType.MD5, contents);
-            let file = this.__cache_dir.get_child(`${md5}`);
+            const md5 = GLib.compute_checksum_for_data(
+                GLib.ChecksumType.MD5,
+                contents
+            );
+            const file = this._cacheDir.get_child(`${md5}`);
 
             if (file.query_exists(null)) {
                 resolve(file.get_path());
@@ -133,7 +405,8 @@ var Store = GObject.registerClass({
                             file.replace_contents_finish(res);
                             resolve(file.get_path());
                         } catch (e) {
-                            reject(e);
+                            debug(e, 'Storing avatar');
+                            resolve(undefined);
                         }
                     }
                 );
@@ -142,194 +415,282 @@ var Store = GObject.registerClass({
     }
 
     /**
-     * Set a contact avatar from a file path
-     *
-     * @param {object} id - The contact id
-     * @param {string} contents - A file path to a GdkPixbuf compatible image
-     * @return {object} - The updated contact
-     */
-    setAvatarPath(id, path) {
-        let contact = this.__cache_data[id];
-
-        if (contact) {
-            this.__cache_data[id].avatar = path;
-            this.update();
-            return this.__cache_data[id];
-        }
-    }
-
-    /**
      * Query the Store for a contact by name and/or number.
      *
      * @param {Object} query - A query object
-     * @param {String} [query.name] - The contact's name
-     * @param {String} query.number - The contact's number
+     * @param {string} [query.name] - The contact's name
+     * @param {string} query.number - The contact's number
+     * @return {Object} A contact object
      */
     query(query) {
-        // sanity check
-        if (!query.number) {
-            throw new Error('query.number is undefined');
-        }
-
         // First look for an existing contact by number
-        let contacts = Object.values(this.__cache_data);
-        let matches = [];
-        let qnumber = query.number.toPhoneNumber();
+        const contacts = this.contacts;
+        const matches = [];
+        const qnumber = query.number.toPhoneNumber();
 
-        for (let i = 0; i < contacts.length; i++) {
-            let contact = contacts[i];
+        for (let i = 0, len = contacts.length; i < len; i++) {
+            const contact = contacts[i];
 
-            for (let num of contact.numbers) {
-                let cnumber = num.value.toPhoneNumber();
+            for (const num of contact.numbers) {
+                const cnumber = num.value.toPhoneNumber();
 
                 if (qnumber.endsWith(cnumber) || cnumber.endsWith(qnumber)) {
-                    // Number match & exact name match; must be it
-                    if (query.name && query.name === contact.name) {
+                    // If no query name or exact match, return immediately
+                    if (!query.name || query.name === contact.name)
                         return contact;
-                    }
 
-                    // Hold off on returning; we might find an exact name match
+                    // Otherwise we might find an exact name match that shares
+                    // the number with another contact
                     matches.push(contact);
                 }
             }
         }
 
         // Return the first match (pretty much what Android does)
-        if (matches.length > 0) {
-            // TODO: this is a check to prevent errors later caused by contacts
-            // that may have be populated without names by GSConnect <= v17
-            if (!matches[0].name) {
-                matches[0].name = query.number;
-            }
-
+        if (matches.length > 0)
             return matches[0];
-        }
 
-        // No match; create a new contact with a unique ID
+        // No match; return a mock contact with a unique ID
         let id = GLib.uuid_string_random();
-        while (this.__cache_data.hasOwnProperty(id)) {
-            id = GLib.uuid_string_random();
-        }
 
-        // Add the contact to the cache
-        this.__cache_data[id] = {
+        while (this._cacheData.hasOwnProperty(id))
+            id = GLib.uuid_string_random();
+
+        return {
             id: id,
             name: query.name || query.number,
             numbers: [{value: query.number, type: 'unknown'}],
-            origin: 'gsconnect'
+            origin: 'gsconnect',
         };
-
-        this.update();
-
-        // Return the created contact
-        return this.__cache_data[id];
     }
 
-    // FIXME: API compatible with GListModel
-    get_item(position) {
-        try {
-            return (this.__cache_data[position]) ? this.__cache_data[position] : null;
-        } catch (e) {
-            return null;
-        }
+    get_contact(position) {
+        if (this._cacheData[position] !== undefined)
+            return this._cacheData[position];
+
+        return null;
     }
 
     /**
      * Add a contact, checking for validity
      *
-     * @param {string} id - The id of the contact to delete
+     * @param {Object} contact - A contact object
+     * @param {boolean} write - Write to disk
      */
-    add(contact) {
-        switch (true) {
-            case !contact.id:
-            case !contact.name:
-            case !contact.numbers:
-            case !contact.numbers[0]:
-            case !contact.numbers[0].type:
-            case !contact.numbers[0].value:
-                return;
+    add(contact, write = true) {
+        // Ensure the contact has a unique id
+        if (!contact.id) {
+            let id = GLib.uuid_string_random();
 
-            // Updated contact
-            case this.__cache_data.hasOwnProperty(contact.id):
-                Object.assign(this.__cache_data[contact.id], contact);
-                break;
+            while (this._cacheData[id])
+                id = GLib.uuid_string_random();
 
-            // New contact
-            default:
-                this.__cache_data[contact.id] = contact;
+            contact.id = id;
         }
 
-        this.update();
+        // Ensure the contact has an origin
+        if (!contact.origin)
+            contact.origin = 'gsconnect';
+
+        // This is an updated contact
+        if (this._cacheData[contact.id]) {
+            this._cacheData[contact.id] = contact;
+            this.emit('contact-changed', contact.id);
+
+        // This is a new contact
+        } else {
+            this._cacheData[contact.id] = contact;
+            this.emit('contact-added', contact.id);
+        }
+
+        // Write if requested
+        if (write)
+            this.save();
     }
 
     /**
      * Remove a contact by id
      *
      * @param {string} id - The id of the contact to delete
+     * @param {boolean} write - Write to disk
      */
-    remove(id) {
-        if (this.__cache_data[id]) {
-            delete this.__cache_data[id];
-            this.update();
+    remove(id, write = true) {
+        // Only remove if the contact actually exists
+        if (this._cacheData[id]) {
+            delete this._cacheData[id];
+            this.emit('contact-removed', id);
+
+            // Write if requested
+            if (write)
+                this.save();
         }
     }
 
-    clear(only_temp = false) {
+    /**
+     * Lookup a contact for each address object in @addresses and return a
+     * dictionary of address (eg. phone number) to contact object.
+     *
+     * { "555-5555": { "name": "...", "numbers": [], ... } }
+     *
+     * @param {Object[]} addresses - A list of address objects
+     * @return {Object} A dictionary of phone numbers and contacts
+     */
+    lookupAddresses(addresses) {
+        const contacts = {};
+
+        // Lookup contacts for each address
+        for (let i = 0, len = addresses.length; i < len; i++) {
+            const address = addresses[i].address;
+
+            contacts[address] = this.query({
+                number: address,
+            });
+        }
+
+        return contacts;
+    }
+
+    async clear() {
         try {
-            if (only_temp) {
-                for (let contact of Object.values(this.__cache_data)) {
-                    if (contact.origin === 'gsconnect') {
-                        delete this.__cache_data[contact.id];
-                    }
-                }
-            } else {
-                this.__cache_data = {};
+            const contacts = this.contacts;
+
+            for (let i = 0, len = contacts.length; i < len; i++)
+                await this.remove(contacts[i].id, false);
+
+            await this.save();
+        } catch (e) {
+            debug(e);
+        }
+    }
+
+    /**
+     * Update the contact store from a dictionary of our custom contact objects.
+     *
+     * @param {Object} json - an Object of contact Objects
+     */
+    async update(json = {}) {
+        try {
+            let contacts = Object.values(json);
+
+            for (let i = 0, len = contacts.length; i < len; i++) {
+                const new_contact = contacts[i];
+                const contact = this._cacheData[new_contact.id];
+
+                if (!contact || new_contact.timestamp !== contact.timestamp)
+                    await this.add(new_contact, false);
             }
 
-            this.update();
+            // Prune contacts
+            contacts = this.contacts;
+
+            for (let i = 0, len = contacts.length; i < len; i++) {
+                const contact = contacts[i];
+
+                if (!json[contact.id])
+                    await this.remove(contact.id, false);
+            }
+
+            await this.save();
         } catch (e) {
-            logError(e);
+            debug(e, 'Updating contacts');
         }
     }
 
-    update(json = {}) {
+    /**
+     * Fetch and update the contact store from its source.
+     *
+     * The default function initializes the EDS server, or logs a debug message
+     * if EDS is unavailable. Derived classes should request an update from the
+     * remote source.
+     */
+    async fetch() {
         try {
-            this.__cache_data = Object.assign(this.__cache_data, json);
-            this.notify('contacts');
+            if (this.context === null && HAVE_EDS)
+                await this._initEvolutionDataServer();
+            else
+                throw new Error('Evolution Data Server not available');
         } catch (e) {
-            logError(e);
+            debug(e);
         }
     }
 
-    async _loadFolks() {
+    /**
+     * Load the contacts from disk.
+     */
+    async load() {
         try {
-            let folks = await new Promise((resolve, reject) => {
-                let proc = this._launcher.spawnv([
-                    gsconnect.extdatadir + '/service/components/folks.py'
-                ]);
-
-                proc.communicate_utf8_async(null, null, (proc, res) => {
+            this._cacheData = await new Promise((resolve, reject) => {
+                this._cacheFile.load_contents_async(null, (file, res) => {
                     try {
-                        let [, stdout, stderr] = proc.communicate_utf8_finish(res);
+                        const contents = file.load_contents_finish(res)[1];
 
-                        if (stderr.length > 0) {
-                            throw new Error(stderr);
-                        }
-
-                        resolve(JSON.parse(stdout));
+                        resolve(JSON.parse(ByteArray.toString(contents)));
                     } catch (e) {
-                        // format python errors
-                        e.stack = e.message;
-                        e.message = e.stack.split('\n').filter(l => l).pop();
-
                         reject(e);
                     }
                 });
             });
-
-            this.update(folks);
         } catch (e) {
-            logWarning(e);
+            debug(e);
+        } finally {
+            this.notify('context');
+        }
+    }
+
+    /**
+     * Save the contacts to disk.
+     */
+    async save() {
+        // EDS is handling storage
+        if (this.context === null && HAVE_EDS)
+            return;
+
+        if (this.__cache_lock) {
+            this.__cache_queue = true;
+            return;
+        }
+
+        try {
+            this.__cache_lock = true;
+
+            await new Promise((resolve, reject) => {
+                this._cacheFile.replace_contents_bytes_async(
+                    new GLib.Bytes(JSON.stringify(this._cacheData, null, 2)),
+                    null,
+                    false,
+                    Gio.FileCreateFlags.REPLACE_DESTINATION,
+                    null,
+                    (file, res) => {
+                        try {
+                            resolve(file.replace_contents_finish(res));
+                        } catch (e) {
+                            reject(e);
+                        }
+                    }
+                );
+            });
+        } catch (e) {
+            debug(e);
+        } finally {
+            this.__cache_lock = false;
+
+            if (this.__cache_queue) {
+                this.__cache_queue = false;
+                this.save();
+            }
+        }
+    }
+
+    destroy() {
+        if (this._watcher !== undefined) {
+            this._watcher.disconnect(this._appearedId);
+            this._watcher.disconnect(this._disappearedId);
+            this._watcher = undefined;
+
+            for (const ebook of this._ebooks.values())
+                this._onDisappeared(null, ebook.source);
+
+            this._edsPrepared = false;
         }
     }
 });
@@ -338,5 +699,5 @@ var Store = GObject.registerClass({
 /**
  * The service class for this component
  */
-var Service = Store;
+var Component = Store;
 

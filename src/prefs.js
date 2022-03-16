@@ -4,38 +4,25 @@ const Gio = imports.gi.Gio;
 const GLib = imports.gi.GLib;
 const Gtk = imports.gi.Gtk;
 
-// Find the root datadir of the extension
-function get_datadir() {
-    let m = /@(.+):\d+/.exec((new Error()).stack.split('\n')[1]);
-    return Gio.File.new_for_path(m[1]).get_parent().get_path();
-}
-
-// Local Imports
-window.gsconnect = {extdatadir: get_datadir()};
-imports.searchPath.unshift(gsconnect.extdatadir);
-imports._gsconnect;
-
+// Bootstrap
+const Extension = imports.misc.extensionUtils.getCurrentExtension();
+const Utils = Extension.imports.shell.utils;
 
 function init() {
-    gsconnect.installService();
-    Gtk.IconTheme.get_default().add_resource_path(gsconnect.app_path);
+    Utils.installService();
 }
 
 function buildPrefsWidget() {
-    let label = new Gtk.Label();
-    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 0, () => {
-        label.get_toplevel().destroy();
+    // Destroy the window once the mainloop starts
+    const widget = new Gtk.Box();
+
+    GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+        widget.get_root().destroy();
         return false;
     });
 
-    let service = Gio.DBusActionGroup.get(
-        Gio.DBus.session,
-        'org.gnome.Shell.Extensions.GSConnect',
-        '/org/gnome/Shell/Extensions/GSConnect'
-    );
-    service.list_actions();
-    service.activate_action('preferences', null);
+    Gio.Subprocess.new([`${Extension.path}/gsconnect-preferences`], 0);
 
-    return label;
+    return widget;
 }
 

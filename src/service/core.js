@@ -6,35 +6,29 @@ const GObject = imports.gi.GObject;
 
 
 /**
- * One-time check for Linux/FreeBSD scoket options
+ * Get the local device type.
+ *
+ * @return {string} A device type string
  */
-var _LINUX_SOCKET_OPTIONS = false;
+function _getDeviceType() {
+    try {
+        let type = GLib.file_get_contents('/sys/class/dmi/id/chassis_type')[1];
 
-try {
-    // This should throw on FreeBSD
-    // https://github.com/freebsd/freebsd/blob/master/sys/netinet/tcp.h#L159
-    new Gio.Socket({
-        family: Gio.SocketFamily.IPV4,
-        protocol: Gio.SocketProtocol.TCP,
-        type: Gio.SocketType.STREAM
-    }).get_option(6, 5);
+        type = Number(imports.byteArray.toString(type));
 
-    // Otherwise we can use Linux socket options
-    debug('Setting socket options for Linux');
-    _LINUX_SOCKET_OPTIONS = true;
-} catch (e) {
-    debug('Setting socket options for FreeBSD');
-    _LINUX_SOCKET_OPTIONS = false;
+        if ([8, 9, 10, 14].includes(type))
+            return 'laptop';
+
+        return 'desktop';
+    } catch (e) {
+        return 'desktop';
+    }
 }
 
 
 /**
- * Packet
- *
- * The packet class is a simple Object-derived class. It only exists to offer
- * conveniences for coercing to a string writable to a channel and constructing
- * from Strings and Objects. In future, it could probably be optimized to avoid
- * excessive shape-trees since it's the most common object in the protocol.
+ * The packet class is a simple Object-derived class, offering some conveniences
+ * for working with KDE Connect packets.
  */
 var Packet = class Packet {
 
@@ -43,411 +37,233 @@ var Packet = class Packet {
         this.type = undefined;
         this.body = {};
 
-        if (data === null) {
-            return;
-        } else if (typeof data === 'string') {
-            this.fromString(data);
-        } else {
-            this.fromObject(data);
-        }
-    }
-
-    /**
-     * Update the packet from a string of JSON
-     *
-     * @param {string} data - A string of text
-     */
-    fromString(data) {
-        try {
-            let json = JSON.parse(data);
-            Object.assign(this, json);
-        } catch (e) {
-            throw Error(`Malformed packet: ${e.message}`);
-        }
-    }
-
-    /**
-     * Update the packet from an Object, using and intermediate call to
-     * JSON.stringify() to deep-copy the object, avoiding reference entanglement
-     *
-     * @param {string} data - An object
-     */
-    fromObject(data) {
-        try {
-            let json = JSON.parse(JSON.stringify(data));
-            Object.assign(this, json);
-        } catch (e) {
-            throw Error(`Malformed packet: ${e.message}`);
-        }
+        if (typeof data === 'string')
+            Object.assign(this, JSON.parse(data));
+        else if (data !== null)
+            Object.assign(this, data);
     }
 
     [Symbol.toPrimitive](hint) {
         this.id = Date.now();
 
-        switch (hint) {
-            case 'string':
-                return `${JSON.stringify(this)}\n`;
-            case 'number':
-                return `${JSON.stringify(this)}\n`.length;
-            default:
-                return true;
+        if (hint === 'string')
+            return `${JSON.stringify(this)}\n`;
+
+        if (hint === 'number')
+            return `${JSON.stringify(this)}\n`.length;
+
+        return true;
+    }
+
+    get [Symbol.toStringTag]() {
+        return `Packet:${this.type}`;
+    }
+
+    /**
+     * Deserialize and return a new Packet from an Object or string.
+     *
+     * @param {Object|string} data - A string or dictionary to deserialize
+     * @return {Core.Packet} A new packet object
+     */
+    static deserialize(data) {
+        return new Packet(data);
+    }
+
+    /**
+     * Serialize the packet as a single line with a terminating new-line (`\n`)
+     * character, ready to be written to a channel.
+     *
+     * @return {string} A serialized packet
+     */
+    serialize() {
+        this.id = Date.now();
+        return `${JSON.stringify(this)}\n`;
+    }
+
+    /**
+     * Update the packet from a dictionary or string of JSON
+     *
+     * @param {Object|string} source - Source data
+     */
+    update(source) {
+        try {
+            if (typeof data === 'string')
+                Object.assign(this, JSON.parse(source));
+            else
+                Object.assign(this, source);
+        } catch (e) {
+            throw Error(`Malformed data: ${e.message}`);
         }
     }
 
-    toString() {
-        return `${this}`;
+    /**
+     * Check if the packet has a payload.
+     *
+     * @return {boolean} %true if @packet has a payload
+     */
+    hasPayload() {
+        if (!this.hasOwnProperty('payloadSize'))
+            return false;
+
+        if (!this.hasOwnProperty('payloadTransferInfo'))
+            return false;
+
+        return (Object.keys(this.payloadTransferInfo).length > 0);
     }
 };
 
 
 /**
- * Data Channel
+ * Channel objects handle KDE Connect packet exchange and data transfers for
+ * devices. The implementation is responsible for all negotiation of the
+ * underlying protocol.
  */
-var Channel = class Channel {
+var Channel = GObject.registerClass({
+    GTypeName: 'GSConnectChannel',
+    Properties: {
+        'closed': GObject.ParamSpec.boolean(
+            'closed',
+            'Closed',
+            'Whether the channel has been closed',
+            GObject.ParamFlags.READABLE,
+            false
+        ),
+    },
+}, class Channel extends GObject.Object {
 
-    constructor(params) {
-        Object.assign(this, params);
+    get address() {
+        throw new GObject.NotImplementedError();
+    }
+
+    get backend() {
+        if (this._backend === undefined)
+            this._backend = null;
+
+        return this._backend;
+    }
+
+    set backend(backend) {
+        this._backend = backend;
     }
 
     get cancellable() {
-        if (this._cancellable === undefined) {
+        if (this._cancellable === undefined)
             this._cancellable = new Gio.Cancellable();
-        }
 
         return this._cancellable;
     }
 
-    get certificate() {
-        if (this.type === 'tcp') {
-            return this._connection.get_peer_certificate();
+    get closed() {
+        if (this._closed === undefined)
+            this._closed = false;
+
+        return this._closed;
+    }
+
+    get input_stream() {
+        if (this._input_stream === undefined) {
+            if (this._connection instanceof Gio.IOStream)
+                return this._connection.get_input_stream();
+
+            return null;
         }
 
-        return null;
+        return this._input_stream;
     }
 
-    get service() {
-        return Gio.Application.get_default();
+    set input_stream(stream) {
+        this._input_stream = stream;
     }
 
-    /**
-     * Set socket options
-     */
-    _initSocket(connection) {
-        if (connection instanceof Gio.TcpConnection) {
-            connection.socket.set_keepalive(true);
+    get output_stream() {
+        if (this._output_stream === undefined) {
+            if (this._connection instanceof Gio.IOStream)
+                return this._connection.get_output_stream();
 
-            if (_LINUX_SOCKET_OPTIONS) {
-                connection.socket.set_option(6, 4, 10); // TCP_KEEPIDLE
-                connection.socket.set_option(6, 5, 5);  // TCP_KEEPINTVL
-                connection.socket.set_option(6, 6, 3);  // TCP_KEEPCNT
-            } else {
-                connection.socket.set_option(6, 256, 10); // TCP_KEEPIDLE
-                connection.socket.set_option(6, 512, 5);  // TCP_KEEPINTVL
-                connection.socket.set_option(6, 1024, 3); // TCP_KEEPCNT
-            }
+            return null;
         }
 
-        return connection;
+        return this._output_stream;
+    }
+
+    set output_stream(stream) {
+        this._output_stream = stream;
+    }
+
+    get uuid() {
+        if (this._uuid === undefined)
+            this._uuid = GLib.uuid_string_random();
+
+        return this._uuid;
+    }
+
+    set uuid(uuid) {
+        this._uuid = uuid;
     }
 
     /**
-     * Read the identity packet from the new connection
-     *
-     * @param {Gio.SocketConnection} connection - An unencrypted socket
-     * @return {Gio.SocketConnection} - The connection after success
-     */
-    _receiveIdent(connection) {
-        return new Promise((resolve, reject) => {
-            let stream = new Gio.DataInputStream({
-                base_stream: connection.input_stream,
-                close_base_stream: false
-            });
-
-            stream.read_line_async(
-                GLib.PRIORITY_DEFAULT,
-                this.cancellable,
-                (stream, res) => {
-                    try {
-                        let data = stream.read_line_finish_utf8(res)[0];
-                        stream.close(null);
-
-                        // Store the identity as an object property
-                        this.identity = new Packet(data);
-
-                        // Reject connections without a deviceId
-                        if (!this.identity.body.deviceId) {
-                            throw new Error('missing deviceId');
-                        }
-
-                        resolve(connection);
-                    } catch (e) {
-                        reject(e);
-                    }
-                }
-            );
-        });
-    }
-
-    /**
-     * Write our identity packet to the new connection
-     *
-     * @param {Gio.SocketConnection} connection - An unencrypted socket
-     * @return {Gio.SocketConnection} - The connection after success
-     */
-    _sendIdent(connection) {
-        return new Promise((resolve, reject) => {
-            connection.output_stream.write_all_async(
-                `${this.service.identity}`,
-                GLib.PRIORITY_DEFAULT,
-                this.cancellable,
-                (stream, res) => {
-                    try {
-                        stream.write_all_finish(res);
-                        resolve(connection);
-                    } catch (e) {
-                        reject(e);
-                    }
-                }
-            );
-        });
-    }
-
-    /**
-     * Handshake Gio.TlsConnection
-     */
-    _handshake(connection) {
-        return new Promise((resolve, reject) => {
-            connection.validation_flags = Gio.TlsCertificateFlags.EXPIRED;
-            connection.authentication_mode = Gio.TlsAuthenticationMode.REQUIRED;
-
-            connection.handshake_async(
-                GLib.PRIORITY_DEFAULT,
-                this.cancellable,
-                (connection, res) => {
-                    try {
-                        resolve(connection.handshake_finish(res));
-                    } catch (e) {
-                        reject(e);
-                    }
-                }
-            );
-        });
-    }
-
-    async _authenticate(connection) {
-        // FIXME: This is a hack, error propogation needs to be fixed
-        try {
-            // Standard TLS Handshake
-            await this._handshake(connection);
-
-            // Bail if deviceId is missing
-            if (!this.identity.body.hasOwnProperty('deviceId')) {
-                throw new Error('missing deviceId');
-            }
-
-            // Get a GSettings object for this deviceId
-            let settings = new Gio.Settings({
-                settings_schema: gsconnect.gschema.lookup(gsconnect.app_id + '.Device', true),
-                path: gsconnect.settings.path + 'device/' + this.identity.body.deviceId + '/'
-            });
-            let cert_pem = settings.get_string('certificate-pem');
-
-            // If we have a certificate for this deviceId, we can verify it
-            if (cert_pem !== '') {
-                let certificate = Gio.TlsCertificate.new_from_pem(cert_pem, -1);
-                let valid = certificate.is_same(connection.peer_certificate);
-
-                // This is a fraudulent certificate; notify the user
-                if (!valid) {
-                    let error = new Error();
-                    error.name = 'AuthenticationError';
-                    error.deviceName = this.identity.body.deviceName;
-                    error.deviceHost = connection.base_io_stream.get_remote_address().address.to_string();
-                    this.service.notify_error(error);
-
-                    throw error;
-                }
-            }
-
-            return connection;
-        } catch (e) {
-            return Promise.reject(e);
-        }
-    }
-
-    /**
-     * If @connection is a Gio.TcpConnection, wrap it in Gio.TlsClientConnection
-     * and initiate handshake, otherwise just return it.
-     */
-    _clientEncryption(connection) {
-        if (connection instanceof Gio.TcpConnection) {
-            connection = Gio.TlsClientConnection.new(
-                connection,
-                connection.socket.remote_address
-            );
-            connection.set_certificate(this.service.certificate);
-
-            return this._authenticate(connection);
-        } else {
-            return Promise.resolve(connection);
-        }
-    }
-
-    /**
-     * If @connection is a Gio.TcpConnection, wrap it in Gio.TlsServerConnection
-     * and initiate handshake, otherwise just return it.
-     */
-    _serverEncryption(connection) {
-        if (connection instanceof Gio.TcpConnection) {
-            connection = Gio.TlsServerConnection.new(
-                connection,
-                this.service.certificate
-            );
-
-            // If we're the server, we trust-on-first-use and verify after
-            let _id = connection.connect('accept-certificate', (conn) => {
-                conn.disconnect(_id);
-                return true;
-            });
-
-            return this._authenticate(connection);
-        } else {
-            return Promise.resolve(connection);
-        }
-    }
-
-    /**
-     * Attach the channel to a device and monitor the input stream for packets
-     *
-     * @param {Device.Device} - The device to attach to
-     */
-    attach(device) {
-        // Detach any existing channel
-        if (device._channel && device._channel !== this) {
-            device._channel.cancellable.disconnect(device._channel._id);
-            device._channel.close();
-        }
-
-        // Attach the new channel and parse it's identity
-        device._channel = this;
-        this._id = this.cancellable.connect(device._setDisconnected.bind(device));
-        device._handleIdentity(this.identity);
-
-        // Setup streams for packet exchange
-        this.input_stream = new Gio.DataInputStream({
-            base_stream: this._connection.input_stream
-        });
-
-        this.output_queue = [];
-        this.output_stream = this._connection.output_stream;
-
-        // Start listening for packets
-        this.receive(device);
-
-        // Emit connected:: if necessary
-        if (!device.connected) {
-            device._setConnected();
-        }
-    }
-
-    /**
-     * Open an outgoing connection
-     *
-     * @param {Gio.SocketConnection} connection - The remote connection
-     * @return {Boolean} - %true on connected, %false otherwise
-     */
-    async open(connection) {
-        try {
-            this._connection = await this._initSocket(connection);
-            this._connection = await this._sendIdent(this._connection);
-            this._connection = await this._serverEncryption(this._connection);
-        } catch (e) {
-            this.close();
-            return Promise.reject(e);
-        }
-    }
-
-    /**
-     * Accept an incoming connection
-     *
-     * @param {Gio.TcpConnection} connection - The incoming connection
-     */
-    async accept(connection) {
-        try {
-            this._connection = await this._initSocket(connection);
-            this._connection = await this._receiveIdent(this._connection);
-            this._connection = await this._clientEncryption(this._connection);
-        } catch (e) {
-            this.close();
-            return Promise.reject(e);
-        }
-    }
-
-    /**
-     * Close all streams associated with this channel, silencing any errors
+     * Close the channel.
      */
     close() {
-        // Cancel any queued operations
-        this.cancellable.cancel();
-
-        // Close any streams
-        [this._connection, this.input_stream, this.output_stream].map(stream => {
-            try {
-                stream.close(null);
-            } catch (e) {
-                debug(e.message);
-            }
-        });
-
-        if (this._listener) {
-            try {
-                this._listener.close();
-            } catch (e) {
-                debug(e.message);
-            }
-        }
+        throw new GObject.NotImplementedError();
     }
 
     /**
-     * Receive a packet from the channel and call receivePacket() on the device
+     * Read a packet.
      *
-     * @param {Device.Device} device - The device which will handle the packet
+     * @param {Gio.Cancellable} [cancellable] - A cancellable
+     * @return {Promise<Core.Packet>} The packet
      */
-    receive(device) {
-        this.input_stream.read_line_async(
-            GLib.PRIORITY_DEFAULT,
-            this.cancellable,
-            (stream, res) => {
-                let data, packet;
+    readPacket(cancellable = null) {
+        if (cancellable === null)
+            cancellable = this.cancellable;
 
-                try {
-                    // Try to read and parse a packet
-                    data = stream.read_line_finish_utf8(res)[0];
+        if (!(this.input_stream instanceof Gio.DataInputStream)) {
+            this.input_stream = new Gio.DataInputStream({
+                base_stream: this.input_stream,
+            });
+        }
 
-                    // Queue another receive() before handling the packet
-                    this.receive(device);
+        return new Promise((resolve, reject) => {
+            this.input_stream.read_line_async(
+                GLib.PRIORITY_DEFAULT,
+                cancellable,
+                (stream, res) => {
+                    try {
+                        const data = stream.read_line_finish_utf8(res)[0];
 
-                    // In case %null is returned we don't want an error thrown
-                    // when trying to parse it as a packet
-                    if (data !== null) {
-                        packet = new Packet(data);
-                        debug(packet, this.identity.body.deviceName);
-                        device.receivePacket(packet);
+                        if (data === null) {
+                            throw new Gio.IOErrorEnum({
+                                message: 'End of stream',
+                                code: Gio.IOErrorEnum.CONNECTION_CLOSED,
+                            });
+                        }
+
+                        resolve(new Packet(data));
+                    } catch (e) {
+                        reject(e);
                     }
-                } catch (e) {
-                    debug(e, this.identity.body.deviceName);
-                    this.close();
                 }
-            }
-        );
+            );
+        });
     }
 
-    _send(packet) {
+    /**
+     * Send a packet.
+     *
+     * @param {Core.Packet} packet - The packet to send
+     * @param {Gio.Cancellable} [cancellable] - A cancellable
+     * @return {Promise<boolean>} %true if successful
+     */
+    sendPacket(packet, cancellable = null) {
+        if (cancellable === null)
+            cancellable = this.cancellable;
+
         return new Promise((resolve, reject) => {
             this.output_stream.write_all_async(
-                packet.toString(),
+                packet.serialize(),
                 GLib.PRIORITY_DEFAULT,
-                this.cancellable,
+                cancellable,
                 (stream, res) => {
                     try {
                         resolve(stream.write_all_finish(res));
@@ -460,132 +276,466 @@ var Channel = class Channel {
     }
 
     /**
-     * Send a packet to a device
+     * Reject a transfer.
      *
-     * See: https://github.com/KDE/kdeconnect-kde/blob/master/core/backends/lan/landevicelink.cpp#L92-L94
-     *
-     * @param {object} packet - An dictionary of packet data
+     * @param {Core.Packet} packet - A packet with payload info
      */
-    async send(packet) {
-        let next;
-
-        try {
-            this.output_queue.push(new Packet(packet));
-
-            if (!this.__lock) {
-                this.__lock = true;
-
-                while ((next = this.output_queue.shift())) {
-                    await this._send(next);
-                    debug(next, this.identity.body.deviceName);
-                }
-
-                this.__lock = false;
-            }
-        } catch (e) {
-            debug(e, this.identity.body.deviceName);
-            this.close();
-        }
+    rejectTransfer(packet) {
+        throw new GObject.NotImplementedError();
     }
-};
+
+    /**
+     * Download a payload from a device. Typically implementations will override
+     * this with an async function.
+     *
+     * @param {Core.Packet} packet - A packet
+     * @param {Gio.OutputStream} target - The target stream
+     * @param {Gio.Cancellable} [cancellable] - A cancellable for the upload
+     */
+    download(packet, target, cancellable = null) {
+        throw new GObject.NotImplementedError();
+    }
+
+
+    /**
+     * Upload a payload to a device. Typically implementations will override
+     * this with an async function.
+     *
+     * @param {Core.Packet} packet - The packet describing the transfer
+     * @param {Gio.InputStream} source - The source stream
+     * @param {number} size - The payload size
+     * @param {Gio.Cancellable} [cancellable] - A cancellable for the upload
+     */
+    upload(packet, source, size, cancellable = null) {
+        throw new GObject.NotImplementedError();
+    }
+});
 
 
 /**
- * File Transfer base class
+ * ChannelService implementations provide Channel objects, emitting the
+ * ChannelService::channel signal when a new connection has been accepted.
  */
-var Transfer = class Transfer extends Channel {
+var ChannelService = GObject.registerClass({
+    GTypeName: 'GSConnectChannelService',
+    Properties: {
+        'active': GObject.ParamSpec.boolean(
+            'active',
+            'Active',
+            'Whether the service is active',
+            GObject.ParamFlags.READABLE,
+            false
+        ),
+        'id': GObject.ParamSpec.string(
+            'id',
+            'ID',
+            'The hostname or other network unique id',
+            GObject.ParamFlags.READWRITE,
+            null
+        ),
+        'name': GObject.ParamSpec.string(
+            'name',
+            'Name',
+            'The name of the backend',
+            GObject.ParamFlags.READWRITE,
+            null
+        ),
+    },
+    Signals: {
+        'channel': {
+            flags: GObject.SignalFlags.RUN_LAST,
+            param_types: [Channel.$gtype],
+            return_type: GObject.TYPE_BOOLEAN,
+        },
+    },
+}, class ChannelService extends GObject.Object {
 
-    /**
-     * @param {object} params - Transfer parameters
-     * @param {Device.Device} params.device - The device that owns this transfer
-     * @param {Gio.InputStream} params.input_stream - The input stream (read)
-     * @param {Gio.OutputStrea} params.output_stream - The output stream (write)
-     * @param {number} params.size - The size of the transfer in bytes
-     */
-    constructor(params) {
-        super(params);
-        this.device._transfers.set(this.uuid, this);
+    get active() {
+        if (this._active === undefined)
+            this._active = false;
+
+        return this._active;
+    }
+
+    get name() {
+        if (this._name === undefined)
+            this._name = GLib.get_host_name();
+
+        return this._name;
+    }
+
+    set name(name) {
+        if (this.name === name)
+            return;
+
+        this._name = name;
+        this.notify('name');
+    }
+
+    get id() {
+        if (this._id === undefined)
+            this._id = GLib.uuid_string_random();
+
+        return this._id;
+    }
+
+    set id(id) {
+        if (this.id === id)
+            return;
+
+        this._id = id;
     }
 
     get identity() {
-        return this.device._channel.identity;
+        if (this._identity === undefined)
+            this.buildIdentity();
+
+        return this._identity;
     }
 
-    get type() {
-        return 'transfer';
+    /**
+     * Broadcast directly to @address or the whole network if %null
+     *
+     * @param {string} [address] - A string address
+     */
+    broadcast(address = null) {
+        throw new GObject.NotImplementedError();
     }
 
-    // For bluetooth transfers this also serves as the per-transfer profile UUID
-    get uuid() {
-        if (this._uuid === undefined) {
-            this._uuid = GLib.uuid_string_random();
+    /**
+     * Rebuild the identity packet used to identify the local device. An
+     * implementation may override this to make modifications to the default
+     * capabilities if necessary (eg. bluez without SFTP support).
+     */
+    buildIdentity() {
+        this._identity = new Packet({
+            id: 0,
+            type: 'kdeconnect.identity',
+            body: {
+                deviceId: this.id,
+                deviceName: this.name,
+                deviceType: _getDeviceType(),
+                protocolVersion: 7,
+                incomingCapabilities: [],
+                outgoingCapabilities: [],
+            },
+        });
+
+        for (const name in imports.service.plugins) {
+            // Exclude mousepad/presenter capability in unsupported sessions
+            if (!HAVE_REMOTEINPUT && ['mousepad', 'presenter'].includes(name))
+                continue;
+
+            const meta = imports.service.plugins[name].Metadata;
+
+            if (meta === undefined)
+                continue;
+
+            for (const type of meta.incomingCapabilities)
+                this._identity.body.incomingCapabilities.push(type);
+
+            for (const type of meta.outgoingCapabilities)
+                this._identity.body.outgoingCapabilities.push(type);
         }
+    }
+
+    /**
+     * Emit Core.ChannelService::channel
+     *
+     * @param {Core.Channel} channel - The new channel
+     */
+    channel(channel) {
+        if (!this.emit('channel', channel))
+            channel.close();
+    }
+
+    /**
+     * Start the channel service. Implementations should throw an error if the
+     * service fails to meet any of its requirements for opening or accepting
+     * connections.
+     */
+    start() {
+        throw new GObject.NotImplementedError();
+    }
+
+    /**
+     * Stop the channel service.
+     */
+    stop() {
+        throw new GObject.NotImplementedError();
+    }
+
+    /**
+     * Destroy the channel service.
+     */
+    destroy() {
+    }
+});
+
+
+/**
+ * A class representing a file transfer.
+ */
+var Transfer = GObject.registerClass({
+    GTypeName: 'GSConnectTransfer',
+    Properties: {
+        'channel': GObject.ParamSpec.object(
+            'channel',
+            'Channel',
+            'The channel that owns this transfer',
+            GObject.ParamFlags.READWRITE,
+            Channel.$gtype
+        ),
+        'completed': GObject.ParamSpec.boolean(
+            'completed',
+            'Completed',
+            'Whether the transfer has completed',
+            GObject.ParamFlags.READABLE,
+            false
+        ),
+        'device': GObject.ParamSpec.object(
+            'device',
+            'Device',
+            'The device that created this transfer',
+            GObject.ParamFlags.READWRITE,
+            GObject.Object.$gtype
+        ),
+    },
+}, class Transfer extends GObject.Object {
+
+    _init(params = {}) {
+        super._init(params);
+
+        this._cancellable = new Gio.Cancellable();
+        this._items = [];
+    }
+
+    get channel() {
+        if (this._channel === undefined)
+            this._channel = null;
+
+        return this._channel;
+    }
+
+    set channel(channel) {
+        if (this.channel === channel)
+            return;
+
+        this._channel = channel;
+    }
+
+    get completed() {
+        if (this._completed === undefined)
+            this._completed = false;
+
+        return this._completed;
+    }
+
+    get device() {
+        if (this._device === undefined)
+            this._device = null;
+
+        return this._device;
+    }
+
+    set device(device) {
+        if (this.device === device)
+            return;
+
+        this._device = device;
+    }
+
+    get uuid() {
+        if (this._uuid === undefined)
+            this._uuid = GLib.uuid_string_random();
 
         return this._uuid;
     }
 
-    set uuid(uuid) {
-        this._uuid = uuid;
-    }
-
     /**
-     * Override in protocol implementation
-     */
-    async upload() {
-        throw new GObject.NotImplementedError();
-    }
-
-    async download() {
-        throw new GObject.NotImplementedError();
-    }
-
-    /**
-     * Cancel the transfer in progress
-     */
-    cancel() {
-        this.close();
-    }
-
-    close() {
-        this.device._transfers.delete(this.uuid);
-        super.close();
-    }
-
-    /**
-     * Transfer using g_output_stream_splice()
+     * Ensure there is a stream for the transfer item.
      *
-     * @return {Boolean} - %true on success, %false on failure.
+     * @param {Object} item - A transfer item
+     * @param {Gio.Cancellable} [cancellable] - A cancellable
      */
-    async _transfer() {
-        let result = false;
+    async _ensureStream(item, cancellable = null) {
+        // This is an upload from a remote device
+        if (item.packet.hasPayload()) {
+            if (item.target instanceof Gio.OutputStream)
+                return;
+
+            if (item.file instanceof Gio.File) {
+                item.target = await new Promise((resolve, reject) => {
+                    item.file.replace_async(
+                        null,
+                        false,
+                        Gio.FileCreateFlags.REPLACE_DESTINATION,
+                        GLib.PRIORITY_DEFAULT,
+                        this._cancellable,
+                        (file, res) => {
+                            try {
+                                resolve(file.replace_finish(res));
+                            } catch (e) {
+                                reject(e);
+                            }
+                        }
+                    );
+                });
+            }
+        } else {
+            if (item.source instanceof Gio.InputStream)
+                return;
+
+            if (item.file instanceof Gio.File) {
+                const read = new Promise((resolve, reject) => {
+                    item.file.read_async(
+                        GLib.PRIORITY_DEFAULT,
+                        cancellable,
+                        (file, res) => {
+                            try {
+                                resolve(file.read_finish(res));
+                            } catch (e) {
+                                reject(e);
+                            }
+                        }
+                    );
+                });
+
+                const query = new Promise((resolve, reject) => {
+                    item.file.query_info_async(
+                        Gio.FILE_ATTRIBUTE_STANDARD_SIZE,
+                        Gio.FileQueryInfoFlags.NONE,
+                        GLib.PRIORITY_DEFAULT,
+                        cancellable,
+                        (file, res) => {
+                            try {
+                                resolve(file.query_info_finish(res));
+                            } catch (e) {
+                                reject(e);
+                            }
+                        }
+                    );
+                });
+
+                const [stream, info] = await Promise.all([read, query]);
+                item.source = stream;
+                item.size = info.get_size();
+            }
+        }
+    }
+
+    /**
+     * Add a file to the transfer.
+     *
+     * @param {Core.Packet} packet - A packet
+     * @param {Gio.File} file - A file to transfer
+     */
+    addFile(packet, file) {
+        const item = {
+            packet: new Packet(packet),
+            file: file,
+            source: null,
+            target: null,
+        };
+
+        this._items.push(item);
+    }
+
+    /**
+     * Add a filepath to the transfer.
+     *
+     * @param {Core.Packet} packet - A packet
+     * @param {string} path - A filepath to transfer
+     */
+    addPath(packet, path) {
+        const item = {
+            packet: new Packet(packet),
+            file: Gio.File.new_for_path(path),
+            source: null,
+            target: null,
+        };
+
+        this._items.push(item);
+    }
+
+    /**
+     * Add a stream to the transfer.
+     *
+     * @param {Core.Packet} packet - A packet
+     * @param {Gio.InputStream|Gio.OutputStream} stream - A stream to transfer
+     * @param {number} [size] - Payload size
+     */
+    addStream(packet, stream, size = 0) {
+        const item = {
+            packet: new Packet(packet),
+            file: null,
+            source: null,
+            target: null,
+            size: size,
+        };
+
+        if (stream instanceof Gio.InputStream)
+            item.source = stream;
+        else if (stream instanceof Gio.OutputStream)
+            item.target = stream;
+
+        this._items.push(item);
+    }
+
+    /**
+     * Execute a transfer operation. Implementations may override this, while
+     * the default uses g_output_stream_splice().
+     *
+     * @param {Gio.Cancellable} [cancellable] - A cancellable
+     */
+    async start(cancellable = null) {
+        let error = null;
 
         try {
-            result = await new Promise((resolve, reject) => {
-                this.output_stream.splice_async(
-                    this.input_stream,
-                    Gio.OutputStreamSpliceFlags.NONE,
-                    GLib.PRIORITY_DEFAULT,
-                    this.cancellable,
-                    (source, res) => {
-                        try {
-                            if (source.splice_finish(res) < this.size) {
-                                throw new Error('incomplete data');
-                            }
+            let item;
 
-                            resolve(true);
-                        } catch (e) {
-                            reject(e);
-                        }
-                    }
-                );
-            });
+            // If a cancellable is passed in, chain to its signal
+            if (cancellable instanceof Gio.Cancellable)
+                cancellable.connect(() => this._cancellable.cancel());
+
+            while ((item = this._items.shift())) {
+                // If created for a device, ignore connection changes by
+                // ensuring we have the most recent channel
+                if (this.device !== null)
+                    this._channel = this.device.channel;
+
+                // TODO: transfer queueing?
+                if (this.channel === null || this.channel.closed) {
+                    throw new Gio.IOErrorEnum({
+                        code: Gio.IOErrorEnum.CONNECTION_CLOSED,
+                        message: 'Channel is closed',
+                    });
+                }
+
+                await this._ensureStream(item, this._cancellable);
+
+                if (item.packet.hasPayload()) {
+                    await this.channel.download(item.packet, item.target,
+                        this._cancellable);
+                } else {
+                    await this.channel.upload(item.packet, item.source,
+                        item.size, this._cancellable);
+                }
+            }
         } catch (e) {
-            debug(e, this.device.name);
+            error = e;
         } finally {
-            this.close();
+            this._completed = true;
+            this.notify('completed');
         }
 
-        return result;
+        if (error !== null)
+            throw error;
     }
-};
+
+    cancel() {
+        if (this._cancellable.is_cancelled() === false)
+            this._cancellable.cancel();
+    }
+});
 

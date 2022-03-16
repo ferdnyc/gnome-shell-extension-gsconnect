@@ -1,11 +1,11 @@
-# See https://github.com/andyholmes/gnome-shell-extension-gsconnect/wiki/Packaging
+# See https://github.com/GSConnect/gnome-shell-extension-gsconnect/wiki/Packaging
 
 # Run meson/post-install.sh (glib-compile-schemas)
 option(
   'post_install',
   type: 'boolean',
   value: false,
-  description: 'Run meson/post-install.sh'
+  description: 'Run meson/post-install.sh (eg. glib-compile-schemas)'
 )
 
 # GNOME Shell LIBDIR
@@ -13,7 +13,7 @@ option(
   'gnome_shell_libdir',
   type: 'string',
   value: '',
-  description: 'LIBDIR for GNOME Shell'
+  description: 'LIBDIR for GNOME Shell (eg. $LIBDIR/gnome-shell/Gvc-1.0.typelib)'
 )
 
 # GSettings schema directory
@@ -32,49 +32,66 @@ option(
   description: 'DBus session services directory'
 )
 
-# External program paths
+# firewalld service file
 option(
-  'fusermount_path',
+  'firewalld',
+  type: 'boolean',
+  value: false,
+  description: 'Install firewalld service file'
+)
+
+# External program paths
+# NOTE: these are only useful for distributions like NixOS that don't use PATH
+option(
+  'ffmpeg_path',
   type: 'string',
-  value: 'fusermount',
-  description: 'Path to fusermount binary'
+  value: 'ffmpeg',
+  description: 'Absolute path to ffmpeg binary'
 )
 
 option(
   'openssl_path',
   type: 'string',
   value: 'openssl',
-  description: 'Path to openssl binary'
+  description: 'Absolute path to openssl binary'
 )
 
 option(
   'sshadd_path',
   type: 'string',
   value: 'ssh-add',
-  description: 'Path to sshfs binary'
+  description: 'Absolute path to ssh-add binary'
 )
 
 option(
-  'sshfs_path',
+  'sshkeygen_path',
   type: 'string',
-  value: 'sshfs',
-  description: 'Path to sshfs binary'
+  value: 'ssh-keygen',
+  description: 'Absolute path to ssh-keygen binary'
 )
 
-# Enable/Disable Nautilus extension installation
+# Nautilus/Nemo Python extension installation
 option(
   'nautilus',
   type: 'boolean',
   value: true,
-  description: 'Install nautilus-python extension'
+  description: 'Install file browser extension for Nautilus (Files)'
 )
 
-# Enable/Disable WebExtension manifest installation
+option(
+  'nemo',
+  type: 'boolean',
+  value: false,
+  description: 'Install file browser extension for Nemo'
+)
+
+# WebExtension manifest installation
+# NOTE: this is NOT the WebExtension, but is REQUIRED for it to work.
 option(
   'webextension',
   type: 'boolean',
   value: true,
-  description: 'Install WebExtension manifest for Chrome/Chromium/Firefox'
+  description: 'Install WebExtension manifest for Chrome, Chromium & Firefox'
 )
 
 # Override manifest install so that BROWSER_NMHDIR/foo.json
@@ -97,5 +114,12 @@ option(
   type: 'string',
   value: '',
   description: 'Native Messaging Host directory for Mozilla'
+)
+
+option(
+  'installed_tests',
+  type: 'boolean',
+  value: true,
+  description: 'Install tests'
 )
 

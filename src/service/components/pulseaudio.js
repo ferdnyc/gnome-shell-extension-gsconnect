@@ -2,37 +2,35 @@
 
 const Tweener = imports.tweener.tweener;
 
-const Gio = imports.gi.Gio;
 const GIRepository = imports.gi.GIRepository;
 const GLib = imports.gi.GLib;
 const GObject = imports.gi.GObject;
 
+const Config = imports.config;
 
-try {
-    // Add gnome-shell's typelib dir to the search path
-    let typelibDir = GLib.build_filenamev([gsconnect.libdir, 'gnome-shell']);
-    GIRepository.Repository.prepend_search_path(typelibDir);
-    GIRepository.Repository.prepend_library_path(typelibDir);
 
-    var Gvc = imports.gi.Gvc;
-} catch (e) {
-    e.name = 'GvcError';
-    throw e;
-}
+// Add gnome-shell's typelib dir to the search path
+const typelibDir = GLib.build_filenamev([Config.GNOME_SHELL_LIBDIR, 'gnome-shell']);
+GIRepository.Repository.prepend_search_path(typelibDir);
+GIRepository.Repository.prepend_library_path(typelibDir);
+
+const Gvc = imports.gi.Gvc;
 
 
 /**
  * Extend Gvc.MixerStream with a property for returning a user-visible name
  */
 Object.defineProperty(Gvc.MixerStream.prototype, 'display_name', {
-    get: function() {
+    get: function () {
         try {
-            if (!this.get_ports().length) return this.description;
+            if (!this.get_ports().length)
+                return this.description;
+
             return `${this.get_port().human_port} (${this.description})`;
         } catch (e) {
             return this.description;
         }
-    }
+    },
 });
 
 
@@ -41,8 +39,10 @@ Object.defineProperty(Gvc.MixerStream.prototype, 'display_name', {
  */
 class Stream {
     constructor(mixer, stream) {
-        this._max = mixer.get_vol_max_norm();
+        this._mixer = mixer;
         this._stream = stream;
+
+        this._max = mixer.get_vol_max_norm();
     }
 
     get muted() {
@@ -66,22 +66,33 @@ class Stream {
     /**
      * Gradually raise or lower the stream volume to @value
      *
-     * @param {Number} value - A number in the range 0-1
+     * @param {number} value - A number in the range 0-1
+     * @param {number} [duration] - Duration to fade in seconds
      */
-    fade(value) {
+    fade(value, duration = 1) {
         Tweener.removeTweens(this);
 
         if (this._stream.volume > value) {
+            this._mixer.fading = true;
+
             Tweener.addTween(this, {
                 volume: value,
-                time: 1,
-                transition: 'easeOutCubic'
+                time: duration,
+                transition: 'easeOutCubic',
+                onComplete: () => {
+                    this._mixer.fading = false;
+                },
             });
         } else if (this._stream.volume < value) {
+            this._mixer.fading = true;
+
             Tweener.addTween(this, {
                 volume: value,
-                time: 1,
-                transition: 'easeInCubic'
+                time: duration,
+                transition: 'easeInCubic',
+                onComplete: () => {
+                    this._mixer.fading = false;
+                },
             });
         }
     }
@@ -95,38 +106,53 @@ class Stream {
  * The Mixer class uses GNOME Shell's Gvc library to control the system volume
  * and offers a few convenience functions.
  */
-var Mixer = GObject.registerClass({
-    GTypeName: 'GSConnectAudioMixer'
+const Mixer = GObject.registerClass({
+    GTypeName: 'GSConnectAudioMixer',
 }, class Mixer extends Gvc.MixerControl {
     _init(params) {
         super._init({name: 'GSConnect'});
 
-        this.open();
-
         this._previousVolume = undefined;
         this._volumeMuted = false;
         this._microphoneMuted = false;
+
+        this.open();
+    }
+
+    get fading() {
+        if (this._fading === undefined)
+            this._fading = false;
+
+        return this._fading;
+    }
+
+    set fading(bool) {
+        if (this.fading === bool)
+            return;
+
+        this._fading = bool;
+
+        if (this.fading)
+            this.emit('stream-changed', this._output._stream.id);
     }
 
     get input() {
-        if (this._input === undefined) {
+        if (this._input === undefined)
             this.vfunc_default_source_changed();
-        }
 
         return this._input;
     }
 
     get output() {
-        if (this._output === undefined) {
+        if (this._output === undefined)
             this.vfunc_default_sink_changed();
-        }
 
         return this._output;
     }
 
     vfunc_default_sink_changed(id) {
         try {
-            let sink = this.get_default_sink();
+            const sink = this.get_default_sink();
             this._output = (sink) ? new Stream(this, sink) : null;
         } catch (e) {
             logError(e);
@@ -135,7 +161,7 @@ var Mixer = GObject.registerClass({
 
     vfunc_default_source_changed(id) {
         try {
-            let source = this.get_default_source();
+            const source = this.get_default_source();
             this._input = (source) ? new Stream(this, source) : null;
         } catch (e) {
             logError(e);
@@ -155,12 +181,14 @@ var Mixer = GObject.registerClass({
 
     /**
      * Store the current output volume then lower it to %15
+     *
+     * @param {number} duration - Duration in seconds to fade
      */
-    lowerVolume() {
+    lowerVolume(duration = 1) {
         try {
             if (this.output.volume > 0.15) {
                 this._previousVolume = Number(this.output.volume);
-                this.output.fade(0.15);
+                this.output.fade(0.15, duration);
             }
         } catch (e) {
             logError(e);
@@ -172,10 +200,11 @@ var Mixer = GObject.registerClass({
      */
     muteVolume() {
         try {
-            if (!this.output.muted) {
-                this.output.muted = true;
-                this._volumeMuted = true;
-            }
+            if (this.output.muted)
+                return;
+
+            this.output.muted = true;
+            this._volumeMuted = true;
         } catch (e) {
             logError(e);
         }
@@ -186,10 +215,11 @@ var Mixer = GObject.registerClass({
      */
     muteMicrophone() {
         try {
-            if (!this.input.muted) {
-                this.input.muted = true;
-                this._microphoneMuted = true;
-            }
+            if (this.input.muted)
+                return;
+
+            this.input.muted = true;
+            this._microphoneMuted = true;
         } catch (e) {
             logError(e);
         }
@@ -221,11 +251,15 @@ var Mixer = GObject.registerClass({
             logError(e);
         }
     }
+
+    destroy() {
+        this.close();
+    }
 });
 
 
 /**
  * The service class for this component
  */
-var Service = Mixer;
+var Component = Mixer;
 

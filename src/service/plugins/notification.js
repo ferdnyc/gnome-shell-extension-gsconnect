@@ -5,20 +5,25 @@ const GLib = imports.gi.GLib;
 const GObject = imports.gi.GObject;
 const Gtk = imports.gi.Gtk;
 
-const PluginsBase = imports.service.plugins.base;
+const Components = imports.service.components;
+const Config = imports.config;
+const PluginBase = imports.service.plugin;
+const NotificationUI = imports.service.ui.notification;
 
 
 var Metadata = {
     label: _('Notifications'),
+    description: _('Share notifications with the paired device'),
     id: 'org.gnome.Shell.Extensions.GSConnect.Plugin.Notification',
     incomingCapabilities: [
         'kdeconnect.notification',
-        'kdeconnect.notification.request'
+        'kdeconnect.notification.request',
     ],
     outgoingCapabilities: [
         'kdeconnect.notification',
+        'kdeconnect.notification.action',
         'kdeconnect.notification.reply',
-        'kdeconnect.notification.request'
+        'kdeconnect.notification.request',
     ],
     actions: {
         withdrawNotification: {
@@ -27,7 +32,7 @@ var Metadata = {
 
             parameter_type: new GLib.VariantType('s'),
             incoming: [],
-            outgoing: ['kdeconnect.notification']
+            outgoing: ['kdeconnect.notification'],
         },
         closeNotification: {
             label: _('Close Notification'),
@@ -35,15 +40,15 @@ var Metadata = {
 
             parameter_type: new GLib.VariantType('s'),
             incoming: [],
-            outgoing: ['kdeconnect.notification.request']
+            outgoing: ['kdeconnect.notification.request'],
         },
         replyNotification: {
             label: _('Reply Notification'),
             icon_name: 'preferences-system-notifications-symbolic',
 
-            parameter_type: new GLib.VariantType('(ss)'),
+            parameter_type: new GLib.VariantType('(ssa{ss})'),
             incoming: ['kdeconnect.notification'],
-            outgoing: ['kdeconnect.notification.reply']
+            outgoing: ['kdeconnect.notification.reply'],
         },
         sendNotification: {
             label: _('Send Notification'),
@@ -51,13 +56,101 @@ var Metadata = {
 
             parameter_type: new GLib.VariantType('a{sv}'),
             incoming: [],
-            outgoing: ['kdeconnect.notification']
-        }
-    }
+            outgoing: ['kdeconnect.notification'],
+        },
+        activateNotification: {
+            label: _('Activate Notification'),
+            icon_name: 'preferences-system-notifications-symbolic',
+
+            parameter_type: new GLib.VariantType('(ss)'),
+            incoming: [],
+            outgoing: ['kdeconnect.notification.action'],
+        },
+    },
 };
 
 
-var ID_REGEX = /^(fdo|gtk)\|([^|]+)\|(.*)$/;
+// A regex for our custom notificaiton ids
+const ID_REGEX = /^(fdo|gtk)\|([^|]+)\|(.*)$/;
+
+// A list of known SMS apps
+const SMS_APPS = [
+    // Popular apps that don't contain the string 'sms'
+    'com.android.messaging',                    // AOSP
+    'com.google.android.apps.messaging',        // Google Messages
+    'com.textra',                               // Textra
+    'xyz.klinker.messenger',                    // Pulse
+    'com.calea.echo',                           // Mood Messenger
+    'com.moez.QKSMS',                           // QKSMS
+    'rpkandrodev.yaata',                        // YAATA
+    'com.tencent.mm',                           // WeChat
+    'com.viber.voip',                           // Viber
+    'com.kakao.talk',                           // KakaoTalk
+    'com.concentriclivers.mms.com.android.mms', // AOSP Clone
+    'fr.slvn.mms',                              // AOSP Clone
+    'com.promessage.message',                   //
+    'com.htc.sense.mms',                        // HTC Messages
+
+    // Known not to work with sms plugin
+    'org.thoughtcrime.securesms',               // Signal Private Messenger
+    'com.samsung.android.messaging',             // Samsung Messages
+];
+
+
+/**
+ * Try to determine if an notification is from an SMS app
+ *
+ * @param {Core.Packet} packet - A `kdeconnect.notification`
+ * @return {boolean} Whether the notification is from an SMS app
+ */
+function _isSmsNotification(packet) {
+    const id = packet.body.id;
+
+    if (id.includes('sms'))
+        return true;
+
+    for (let i = 0, len = SMS_APPS.length; i < len; i++) {
+        if (id.includes(SMS_APPS[i]))
+            return true;
+    }
+
+    return false;
+}
+
+
+/**
+ * Remove a local libnotify or Gtk notification.
+ *
+ * @param {String|Number} id - Gtk (string) or libnotify id (uint32)
+ * @param {String|null} application - Application Id if Gtk or null
+ */
+function _removeNotification(id, application = null) {
+    let name, path, method, variant;
+
+    if (application !== null) {
+        name = 'org.gtk.Notifications';
+        method = 'RemoveNotification';
+        path = '/org/gtk/Notifications';
+        variant = new GLib.Variant('(ss)', [application, id]);
+    } else {
+        name = 'org.freedesktop.Notifications';
+        path = '/org/freedesktop/Notifications';
+        method = 'CloseNotification';
+        variant = new GLib.Variant('(u)', [id]);
+    }
+
+    Gio.DBus.session.call(
+        name, path, name, method, variant, null,
+        Gio.DBusCallFlags.NONE, -1, null,
+        (connection, res) => {
+            try {
+                connection.call_finish(res);
+            } catch (e) {
+                logError(e);
+            }
+        }
+    );
+}
 
 
 /**
@@ -66,64 +159,162 @@ var ID_REGEX = /^(fdo|gtk)\|([^|]+)\|(.*)$/;
  * https://github.com/KDE/kdeconnect-kde/tree/master/plugins/sendnotifications
  */
 var Plugin = GObject.registerClass({
-    GTypeName: 'GSConnectNotificationPlugin'
-}, class Plugin extends PluginsBase.Plugin {
+    GTypeName: 'GSConnectNotificationPlugin',
+}, class Plugin extends PluginBase.Plugin {
 
     _init(device) {
         super._init(device, 'notification');
 
-        this._sms = {};
-    }
+        this._listener = Components.acquire('notification');
+        this._session = Components.acquire('session');
 
-    handlePacket(packet) {
-        switch (packet.type) {
-            case 'kdeconnect.notification':
-                return this._handleNotification(packet);
+        this._notificationAddedId = this._listener.connect(
+            'notification-added',
+            this._onNotificationAdded.bind(this)
+        );
 
-            case 'kdeconnect.notification.request':
-                return this._handleRequest(packet);
-
-            // We don't support *incoming* replies (yet)
-            case 'kdeconnect.notification.reply':
-                logWarning('Not implemented', packet.type);
-                return;
-
-            default:
-                logWarning('Unknown notification packet', this.device.name);
-        }
+        // Load application notification settings
+        this._applicationsChangedId = this.settings.connect(
+            'changed::applications',
+            this._onApplicationsChanged.bind(this)
+        );
+        this._onApplicationsChanged(this.settings, 'applications');
+        this._applicationsChangedSkip = false;
     }
 
     connected() {
         super.connected();
 
-        this.requestNotifications();
+        this._requestNotifications();
     }
 
-    /**
-     * Handle an incoming notification or closed report.
-     */
-    _handleNotification(packet) {
-        // A report that a remote notification has been dismissed
-        if (packet.body.hasOwnProperty('isCancel')) {
-            this.device.hideNotification(packet.body.id);
+    handlePacket(packet) {
+        switch (packet.type) {
+            case 'kdeconnect.notification':
+                this._handleNotification(packet);
+                break;
 
-        // A silent notification; process it so we can abort the transfer
-        } else if (packet.body.hasOwnProperty('silent')) {
-            this.silenceNotification(packet);
+            // TODO
+            case 'kdeconnect.notification.action':
+                this._handleNotificationAction(packet);
+                break;
 
-        // A normal, remote notification
-        } else {
-            this.receiveNotification(packet);
+            // No Linux/BSD desktop notifications are repliable as yet
+            case 'kdeconnect.notification.reply':
+                debug(`Not implemented: ${packet.type}`);
+                break;
+
+            case 'kdeconnect.notification.request':
+                this._handleNotificationRequest(packet);
+                break;
+
+            default:
+                debug(`Unknown notification packet: ${packet.type}`);
+        }
+    }
+
+    _onApplicationsChanged(settings, key) {
+        if (this._applicationsChangedSkip)
+            return;
+
+        try {
+            const json = settings.get_string(key);
+            this._applications = JSON.parse(json);
+        } catch (e) {
+            debug(e, this.device.name);
+
+            this._applicationsChangedSkip = true;
+            settings.set_string(key, '{}');
+            this._applicationsChangedSkip = false;
+        }
+    }
+
+    _onNotificationAdded(listener, notification) {
+        try {
+            const notif = notification.full_unpack();
+
+            // An unconfigured application
+            if (notif.appName && !this._applications[notif.appName]) {
+                this._applications[notif.appName] = {
+                    iconName: 'system-run-symbolic',
+                    enabled: true,
+                };
+
+                // Store the themed icons for the device preferences window
+                if (notif.icon === undefined) {
+                    // Keep default
+
+                } else if (typeof notif.icon === 'string') {
+                    this._applications[notif.appName].iconName = notif.icon;
+
+                } else if (notif.icon instanceof Gio.ThemedIcon) {
+                    const iconName = notif.icon.get_names()[0];
+                    this._applications[notif.appName].iconName = iconName;
+                }
+
+                this._applicationsChangedSkip = true;
+                this.settings.set_string(
+                    'applications',
+                    JSON.stringify(this._applications)
+                );
+                this._applicationsChangedSkip = false;
+            }
+
+            // Sending notifications forbidden
+            if (!this.settings.get_boolean('send-notifications'))
+                return;
+
+            // Sending when the session is active is forbidden
+            if (!this.settings.get_boolean('send-active') && this._session.active)
+                return;
+
+            // Notifications disabled for this application
+            if (notif.appName && !this._applications[notif.appName].enabled)
+                return;
+
+            this.sendNotification(notif);
+        } catch (e) {
+            debug(e, this.device.name);
         }
     }
 
     /**
-     * Handle an incoming request to close or list notifications.
+     * Handle an incoming notification or closed report.
+     *
+     * FIXME: upstream kdeconnect-android is tagging many notifications as
+     *        `silent`, causing them to never be shown. Since we already handle
+     *        duplicates in the Shell, we ignore that flag for now.
+     *
+     * @param {Core.Packet} packet - A `kdeconnect.notification`
      */
-    _handleRequest(packet) {
+    _handleNotification(packet) {
+        // A report that a remote notification has been dismissed
+        if (packet.body.hasOwnProperty('isCancel'))
+            this.device.hideNotification(packet.body.id);
+
+        // A normal, remote notification
+        else
+            this._receiveNotification(packet);
+    }
+
+    /**
+     * Handle an incoming request to activate a notification action.
+     *
+     * @param {Core.Packet} packet - A `kdeconnect.notification.action`
+     */
+    _handleNotificationAction(packet) {
+        throw new GObject.NotImplementedError();
+    }
+
+    /**
+     * Handle an incoming request to close or list notifications.
+     *
+     * @param {Core.Packet} packet - A `kdeconnect.notification.request`
+     */
+    _handleNotificationRequest(packet) {
         // A request for our notifications. This isn't implemented and would be
         // pretty hard to without communicating with GNOME Shell.
-        if (packet.body.hasOwnProperty('request')) {
+        if (packet.body.hasOwnProperty('request'))
             return;
 
         // A request to close a local notification
@@ -134,133 +325,91 @@ var Plugin = GObject.registerClass({
         // For clients that do support it, we report notification ids in the
         // form "type|application-id|notification-id" so we can close it with
         // the appropriate service.
-        } else if (packet.body.hasOwnProperty('cancel')) {
-            let [, type, application, id] = ID_REGEX.exec(packet.body.cancel);
+        if (packet.body.hasOwnProperty('cancel')) {
+            const [, type, application, id] = ID_REGEX.exec(packet.body.cancel);
 
-            switch (type) {
-                case 'fdo':
-                    this.service.remove_notification(parseInt(id));
-                    break;
-
-                case 'gtk':
-                    this.service.remove_notification(id, application);
-                    break;
-
-                default:
-                    logWarning('Unknown notification type', this.device.name);
-            }
+            if (type === 'fdo')
+                _removeNotification(parseInt(id));
+            else if (type === 'gtk')
+                _removeNotification(id, application);
         }
     }
 
     /**
-     * Sending Notifications
-     */
-    async _uploadIcon(packet, icon) {
-        try {
-            // Normalize icon-name strings into GIcons
-            if (typeof icon === 'string') {
-                icon = new Gio.ThemedIcon({name: icon});
-            }
-
-            switch (true) {
-                // TODO: Currently we skip icons for bluetooth connections
-                case (this.device.connection_type === 'bluetooth'):
-                    return this.device.sendPacket(packet);
-
-                // GBytesIcon
-                case (icon instanceof Gio.BytesIcon):
-                    return this._uploadBytesIcon(packet, icon.get_bytes());
-
-                // GFileIcon
-                case (icon instanceof Gio.FileIcon):
-                    return this._uploadFileIcon(packet, icon.get_file());
-
-                // GThemedIcon
-                case (icon instanceof Gio.ThemedIcon):
-                    return this._uploadThemedIcon(packet, icon);
-
-                default:
-                    return this.device.sendPacket(packet);
-            }
-        } catch (e) {
-            logError(e);
-            return this.device.sendPacket(packet);
-        }
-    }
-
-    /**
-     * A function for uploading named icons from a GLib.Bytes object.
+     * Upload an icon from a GLib.Bytes object.
      *
      * @param {Core.Packet} packet - The packet for the notification
-     * @param {GLib.Bytes} bytes - The themed icon name
+     * @param {GLib.Bytes} bytes - The icon bytes
      */
     _uploadBytesIcon(packet, bytes) {
-        return this._uploadIconStream(
-            packet,
-            Gio.MemoryInputStream.new_from_bytes(bytes),
-            bytes.get_size()
-        );
+        const stream = Gio.MemoryInputStream.new_from_bytes(bytes);
+        this._uploadIconStream(packet, stream, bytes.get_size());
     }
 
     /**
-     * A function for uploading icons as Gio.File objects
+     * Upload an icon from a Gio.File object.
      *
-     * @param {Core.Packet} packet - The packet for the notification
-     * @param {Gio.File} file - A Gio.File object for the icon
+     * @param {Core.Packet} packet - A `kdeconnect.notification`
+     * @param {Gio.File} file - A file object for the icon
      */
     async _uploadFileIcon(packet, file) {
-        let stream;
+        const read = new Promise((resolve, reject) => {
+            file.read_async(GLib.PRIORITY_DEFAULT, null, (file, res) => {
+                try {
+                    resolve(file.read_finish(res));
+                } catch (e) {
+                    reject(e);
+                }
+            });
+        });
 
-        try {
-            stream = await new Promise((resolve, reject) => {
-                file.read_async(GLib.PRIORITY_DEFAULT, null, (file, res) => {
+        const query = new Promise((resolve, reject) => {
+            file.query_info_async(
+                'standard::size',
+                Gio.FileQueryInfoFlags.NONE,
+                GLib.PRIORITY_DEFAULT,
+                null,
+                (file, res) => {
                     try {
-                        resolve(file.read_finish(res));
+                        resolve(file.query_info_finish(res));
                     } catch (e) {
                         reject(e);
                     }
-                });
-            });
-
-            return this._uploadIconStream(
-                packet,
-                stream,
-                file.query_info('standard::size', 0, null).get_size()
+                }
             );
-        } catch (e) {
-            logError(e);
-            this.device.sendPacket(packet);
-        }
+        });
+
+        const [stream, info] = await Promise.all([read, query]);
+
+        this._uploadIconStream(packet, stream, info.get_size());
     }
 
     /**
      * A function for uploading GThemedIcons
      *
      * @param {Core.Packet} packet - The packet for the notification
-     * @param {Gio.ThemedIcon} file - The GIcon to upload
+     * @param {Gio.ThemedIcon} icon - The GIcon to upload
      */
     _uploadThemedIcon(packet, icon) {
-        let theme = Gtk.IconTheme.get_default();
+        const theme = Gtk.IconTheme.get_default();
+        let file = null;
 
-        for (let name of icon.names) {
-            // kdeconnect-android doesn't support SVGs so find the largest other
-            let info = theme.lookup_icon(
-                name,
-                Math.max.apply(null, theme.get_icon_sizes(name)),
-                Gtk.IconLookupFlags.NO_SVG
-            );
+        for (const name of icon.names) {
+            // NOTE: kdeconnect-android doesn't support SVGs
+            const size = Math.max.apply(null, theme.get_icon_sizes(name));
+            const info = theme.lookup_icon(name, size, Gtk.IconLookupFlags.NO_SVG);
 
             // Send the first icon we find from the options
             if (info) {
-                return this._uploadFileIcon(
-                    packet,
-                    Gio.File.new_for_path(info.get_filename())
-                );
+                file = Gio.File.new_for_path(info.get_filename());
+                break;
             }
         }
 
-        // Fallback to icon-less notification
-        return this.device.sendPacket(packet);
+        if (file)
+            this._uploadFileIcon(packet, file);
+        else
+            this.device.sendPacket(packet);
     }
 
     /**
@@ -272,137 +421,101 @@ var Plugin = GObject.registerClass({
      */
     async _uploadIconStream(packet, stream, size) {
         try {
-            let transfer = this.device.createTransfer({
-                input_stream: stream,
-                size: size
-            });
+            const transfer = this.device.createTransfer();
+            transfer.addStream(packet, stream, size);
 
-            let success = await transfer.upload(packet);
-
-            if (!success) {
-                this.device.sendPacket(packet);
-            }
+            await transfer.start();
         } catch (e) {
             debug(e);
+
             this.device.sendPacket(packet);
         }
     }
 
     /**
-     * This is called by the notification listener.
-     * See Notification.Listener._sendNotification()
+     * Upload an icon from a GIcon or themed icon name.
+     *
+     * @param {Core.Packet} packet - A `kdeconnect.notification`
+     * @param {Gio.Icon|string|null} icon - An icon or %null
+     * @return {Promise} A promise for the operation
+     */
+    _uploadIcon(packet, icon = null) {
+        // Normalize strings into GIcons
+        if (typeof icon === 'string')
+            icon = Gio.Icon.new_for_string(icon);
+
+        if (icon instanceof Gio.ThemedIcon)
+            return this._uploadThemedIcon(packet, icon);
+
+        if (icon instanceof Gio.FileIcon)
+            return this._uploadFileIcon(packet, icon.get_file());
+
+        if (icon instanceof Gio.BytesIcon)
+            return this._uploadBytesIcon(packet, icon.get_bytes());
+
+        return this.device.sendPacket(packet);
+    }
+
+    /**
+     * Send a local notification to the remote device.
+     *
+     * @param {Object} notif - A dictionary of notification parameters
+     * @param {string} notif.appName - The notifying application
+     * @param {string} notif.id - The notification ID
+     * @param {string} notif.title - The notification title
+     * @param {string} notif.body - The notification body
+     * @param {string} notif.ticker - The notification title & body
+     * @param {boolean} notif.isClearable - If the notification can be closed
+     * @param {string|Gio.Icon} notif.icon - An icon name or GIcon
      */
     async sendNotification(notif) {
         try {
-            // Sending notifications is forbidden
-            if (!this.settings.get_boolean('send-notifications')) {
-                return;
-            }
+            const icon = notif.icon || null;
+            delete notif.icon;
 
-            debug(`(${notif.appName}) ${notif.title}: ${notif.text}`);
-
-            // TODO: revisit application notification settings
-            let applications = JSON.parse(this.settings.get_string('applications'));
-
-            // An unknown application
-            if (!applications.hasOwnProperty(notif.appName)) {
-                applications[notif.appName] = {
-                    iconName: 'system-run-symbolic',
-                    enabled: true
-                };
-
-                // Only catch icons for strings and GThemedIcon
-                if (typeof notif.icon === 'string') {
-                    applications[notif.appName].iconName = notif.icon;
-                } else if (notif.icon instanceof Gio.ThemedIcon) {
-                    applications[notif.appName].iconName = notif.icon.names[0];
-                }
-
-                this.settings.set_string(
-                    'applications',
-                    JSON.stringify(applications)
-                );
-            }
-
-            // An enabled application
-            if (applications[notif.appName].enabled) {
-                let icon = notif.icon || null;
-                delete notif.icon;
-
-                let packet = {
-                    id: 0,
-                    type: 'kdeconnect.notification',
-                    body: notif
-                };
-
-                await this._uploadIcon(packet, icon);
-            }
+            await this._uploadIcon({
+                type: 'kdeconnect.notification',
+                body: notif,
+            }, icon);
         } catch (e) {
             logError(e);
         }
     }
 
-    /**
-     * Receiving Notifications
-     */
     async _downloadIcon(packet) {
-        let file, path, stream, success, transfer;
-
         try {
-            if (!packet.payloadTransferInfo) {
+            if (!packet.hasPayload())
                 return null;
-            }
 
             // Save the file in the global cache
-            path = GLib.build_filenamev([
-                gsconnect.cachedir,
-                packet.body.payloadHash || `${Date.now()}`
+            const path = GLib.build_filenamev([
+                Config.CACHEDIR,
+                packet.body.payloadHash || `${Date.now()}`,
             ]);
-            file = Gio.File.new_for_path(path);
 
             // Check if we've already downloaded this icon
-            if (file.query_exists(null)) {
+            // NOTE: if we reject the transfer kdeconnect-android will resend
+            //       the notification packet, which may cause problems wrt #789
+            const file = Gio.File.new_for_path(path);
+
+            if (file.query_exists(null))
                 return new Gio.FileIcon({file: file});
-            }
 
-            // Open the file
-            stream = await new Promise((resolve, reject) => {
-                file.replace_async(null, false, 2, 0, null, (file, res) => {
-                    try {
-                        resolve(file.replace_finish(res));
-                    } catch (e) {
-                        reject(e);
-                    }
-                });
-            });
+            // Open the target path and create a transfer
+            const transfer = this.device.createTransfer();
 
-            // Download the icon
-            transfer = this.device.createTransfer({
-                output_stream: stream,
-                size: packet.payloadSize
-            });
+            transfer.addFile(packet, file);
 
-            success = await transfer.download(
-                packet.payloadTransferInfo.port || packet.payloadTransferInfo.uuid
-            );
+            try {
+                await transfer.start();
 
-            // Return the icon if successful, delete on failure
-            if (success) {
                 return new Gio.FileIcon({file: file});
+            } catch (e) {
+                debug(e, this.device.name);
+
+                file.delete_async(GLib.PRIORITY_DEFAULT, null, null);
+                return null;
             }
-
-            await new Promise((resolve, reject) => {
-                file.delete_async(GLib.PRIORITY_DEFAULT, null, (file, res) => {
-                    try {
-                        file.delete_finish(res);
-                    } catch (e) {
-                    }
-
-                    resolve();
-                });
-            });
-
-            return null;
         } catch (e) {
             debug(e, this.device.name);
             return null;
@@ -410,49 +523,76 @@ var Plugin = GObject.registerClass({
     }
 
     /**
-     * Receive an incoming notification
+     * Receive an incoming notification.
      *
-     * @param {kdeconnect.notification} packet - The notification packet
+     * @param {Core.Packet} packet - A `kdeconnect.notification`
      */
-    async receiveNotification(packet) {
+    async _receiveNotification(packet) {
         try {
             // Set defaults
             let action = null;
+            let buttons = [];
             let id = packet.body.id;
             let title = packet.body.appName;
             let body = `${packet.body.title}: ${packet.body.text}`;
             let icon = await this._downloadIcon(packet);
 
-            // Check if this is a repliable notification
+            // Repliable Notification
             if (packet.body.requestReplyId) {
                 id = `${packet.body.id}|${packet.body.requestReplyId}`;
+                action = {
+                    name: 'replyNotification',
+                    parameter: new GLib.Variant('(ssa{ss})', [
+                        packet.body.requestReplyId,
+                        '',
+                        {
+                            appName: packet.body.appName,
+                            title: packet.body.title,
+                            text: packet.body.text,
+                        },
+                    ]),
+                };
             }
 
+            // Notification Actions
+            if (packet.body.actions) {
+                buttons = packet.body.actions.map(action => {
+                    return {
+                        label: action,
+                        action: 'activateNotification',
+                        parameter: new GLib.Variant('(ss)', [id, action]),
+                    };
+                });
+            }
+
+            // Special case for Missed Calls
+            if (packet.body.id.includes('MissedCall')) {
+                title = packet.body.title;
+                body = packet.body.text;
+
+                if (icon === null)
+                    icon = new Gio.ThemedIcon({name: 'call-missed-symbolic'});
+
             // Special case for SMS notifications
-            if (packet.body.id.includes(':sms')) {
+            } else if (_isSmsNotification(packet)) {
                 title = packet.body.title;
                 body = packet.body.text;
                 action = {
                     name: 'replySms',
-                    parameter: new GLib.Variant('s', packet.body.title)
+                    parameter: new GLib.Variant('s', packet.body.title),
                 };
-                icon = icon || new Gio.ThemedIcon({name: 'sms-symbolic'});
 
-                this._sms[packet.body.ticker] = packet.body.id;
+                if (icon === null)
+                    icon = new Gio.ThemedIcon({name: 'sms-symbolic'});
 
-            // Special case for Missed Calls
-            } else if (packet.body.id.includes('MissedCall')) {
-                title = packet.body.title;
-                body = packet.body.text;
-                icon = icon || new Gio.ThemedIcon({name: 'call-missed-symbolic'});
-
-            // Ignore 'appName' if it's the same as 'title'
+            // Special case where 'appName' is the same as 'title'
             } else if (packet.body.appName === packet.body.title) {
                 body = packet.body.text;
             }
 
-            // If we still don't have an icon use the device icon
-            icon = icon || new Gio.ThemedIcon({name: this.device.icon_name});
+            // Use the device icon if we still don't have one
+            if (icon === null)
+                icon = new Gio.ThemedIcon({name: this.device.icon_name});
 
             // Show the notification
             this.device.showNotification({
@@ -460,7 +600,8 @@ var Plugin = GObject.registerClass({
                 title: title,
                 body: body,
                 icon: icon,
-                action: action
+                action: action,
+                buttons: buttons,
             });
         } catch (e) {
             logError(e);
@@ -468,28 +609,13 @@ var Plugin = GObject.registerClass({
     }
 
     /**
-     * Handle a "silent" notification
-     *
-     * @param {kdeconnect.notification} packet - The notification packet
+     * Request the remote notifications be sent
      */
-    async silenceNotification(packet) {
-        try {
-            if (!packet.payloadTransferInfo) {
-                return null;
-            }
-
-            let transfer = this.device.createTransfer({
-                output_stream: null,
-                size: packet.payloadSize
-            });
-
-            // Since we've passed a bogus stream, this will abort the transfer
-            await transfer.download(
-                packet.payloadTransferInfo.port || packet.payloadTransferInfo.uuid
-            );
-        } catch (e) {
-            debug(e);
-        }
+    _requestNotifications() {
+        this.device.sendPacket({
+            type: 'kdeconnect.notification.request',
+            body: {request: true},
+        });
     }
 
     /**
@@ -499,14 +625,12 @@ var Plugin = GObject.registerClass({
      * @param {string} id - The local notification id
      */
     withdrawNotification(id) {
-        debug(id);
-
         this.device.sendPacket({
             type: 'kdeconnect.notification',
             body: {
                 isCancel: true,
-                id: id
-            }
+                id: id,
+            },
         });
     }
 
@@ -517,18 +641,9 @@ var Plugin = GObject.registerClass({
      * @param {string} id - The remote notification id
      */
     closeNotification(id) {
-        debug(id);
-
-        let tickerId = this._sms[id];
-
-        if (tickerId) {
-            delete this._sms[id];
-            id = tickerId;
-        }
-
         this.device.sendPacket({
             type: 'kdeconnect.notification.request',
-            body: {cancel: id}
+            body: {cancel: id},
         });
     }
 
@@ -537,27 +652,62 @@ var Plugin = GObject.registerClass({
      *
      * @param {string} uuid - The requestReplyId for the repliable notification
      * @param {string} message - The message to reply with
+     * @param {Object} notification - The original notification packet
      */
-    replyNotification(uuid, message) {
-        debug([uuid, message]);
+    replyNotification(uuid, message, notification) {
+        // If this happens for some reason, things will explode
+        if (!uuid)
+            throw Error('Missing UUID');
 
-        this.device.sendPacket({
-            type: 'kdeconnect.notification.reply',
-            body: {
-                requestReplyId: uuid,
-                message: message
-            }
-        });
+        // If the message has no content, open a dialog for the user to add one
+        if (!message) {
+            const dialog = new NotificationUI.ReplyDialog({
+                device: this.device,
+                uuid: uuid,
+                notification: notification,
+                plugin: this,
+            });
+            dialog.present();
+
+        // Otherwise just send the reply
+        } else {
+            this.device.sendPacket({
+                type: 'kdeconnect.notification.reply',
+                body: {
+                    requestReplyId: uuid,
+                    message: message,
+                },
+            });
+        }
     }
 
     /**
-     * Request the remote notifications be sent
+     * Activate a remote notification action
+     *
+     * @param {string} id - The remote notification id
+     * @param {string} action - The notification action (label)
      */
-    requestNotifications() {
+    activateNotification(id, action) {
         this.device.sendPacket({
-            type: 'kdeconnect.notification.request',
-            body: {request: true}
+            type: 'kdeconnect.notification.action',
+            body: {
+                action: action,
+                key: id,
+            },
         });
     }
-});
 
+    destroy() {
+        this.settings.disconnect(this._applicationsChangedId);
+
+        if (this._listener !== undefined) {
+            this._listener.disconnect(this._notificationAddedId);
+            this._listener = Components.release('notification');
+        }
+
+        if (this._session !== undefined)
+            this._session = Components.release('session');
+
+        super.destroy();
+    }
+});

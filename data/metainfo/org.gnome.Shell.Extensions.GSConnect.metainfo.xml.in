@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.gnome.Shell.Extensions.GSConnect</id>
+
+  <name>GSConnect</name>
+  <summary>KDE Connect implementation for GNOME</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-2.0-or-later</project_license>
+
+  <url type="homepage">https://github.com/GSConnect/gnome-shell-extension-gsconnect/</url>
+  <url type="bugtracker">https://github.com/GSConnect/gnome-shell-extension-gsconnect/issues/new</url>
+  <url type="faq">https://github.com/GSConnect/gnome-shell-extension-gsconnect/wiki/Help</url>
+  <url type="translate">https://crwd.in/gsconnect</url>
+
+  <developer_name>GSConnect Team</developer_name>
+
+  <launchable type="desktop-id">org.gnome.Shell.Extensions.GSConnect.desktop</launchable>
+  <launchable type="desktop-id">org.gnome.Shell.Extensions.GSConnect.Preferences.desktop</launchable>
+
+  <provides>
+    <dbus type="session">org.gnome.Shell.Extensions.GSConnect</dbus>
+  </provides>
+
+  <requires>
+    <id>org.gnome.Shell</id>
+  </requires>
+
+  <content_rating type="oars-1.0"/>
+
+  <description>
+    <p>
+      GSConnect is a complete implementation of KDE Connect especially for GNOME Shell with Nautilus, Chrome and Firefox integration. The KDE Connect team has applications for Linux, BSD, Android, Sailfish, macOS and Windows.
+    </p>
+    <p>
+      With GSConnect you can securely connect to mobile devices and other desktops to:
+    </p>
+    <ul>
+      <li>Share files, links and text</li>
+      <li>Send and receive messages</li>
+      <li>Sync clipboard content</li>
+      <li>Sync contacts</li>
+      <li>Sync notifications</li>
+      <li>Control media players</li>
+      <li>Control system volume</li>
+      <li>Execute predefined commands</li>
+      <li>And more…</li>
+    </ul>
+  </description>
+
+  <releases>
+    <release version="48" date="2021-10-03">
+      <url>https://github.com/GSConnect/gnome-shell-extension-gsconnect/releases/tag/v48</url>
+    </release>
+    <release version="47" date="2021-06-18">
+      <url>https://github.com/GSConnect/gnome-shell-extension-gsconnect/releases/tag/v47</url>
+    </release>
+    <release version="46" date="2021-03-29">
+      <url>https://github.com/GSConnect/gnome-shell-extension-gsconnect/releases/tag/v46</url>
+    </release>
+    <release version="45" date="2021-03-28">
+      <url>https://github.com/GSConnect/gnome-shell-extension-gsconnect/releases/tag/v45</url>
+    </release>
+    <release version="44" date="2020-10-27">
+      <url>https://github.com/GSConnect/gnome-shell-extension-gsconnect/releases/tag/v44</url>
+    </release>
+    <release version="43" date="2020-09-21">
+      <url>https://github.com/GSConnect/gnome-shell-extension-gsconnect/releases/tag/v43</url>
+    </release>
+    <release version="42" date="2020-09-19">
+      <url>https://github.com/GSConnect/gnome-shell-extension-gsconnect/releases/tag/v42</url>
+    </release>
+    <release version="41" date="2020-08-15">
+      <url>https://github.com/GSConnect/gnome-shell-extension-gsconnect/releases/tag/v41</url>
+    </release>
+    <release version="40" date="2020-08-14">
+      <url>https://github.com/GSConnect/gnome-shell-extension-gsconnect/releases/tag/v40</url>
+    </release>
+    <release version="39" date="2020-06-22">
+      <url>https://github.com/GSConnect/gnome-shell-extension-gsconnect/releases/tag/v39</url>
+    </release>
+    <release version="38" date="2020-05-14">
+      <url>https://github.com/GSConnect/gnome-shell-extension-gsconnect/releases/tag/v38</url>
+    </release>
+    <release version="37" date="2020-04-16">
+      <url>https://github.com/GSConnect/gnome-shell-extension-gsconnect/releases/tag/v37</url>
+    </release>
+    <release version="36" date="2020-03-27">
+      <url>https://github.com/GSConnect/gnome-shell-extension-gsconnect/releases/tag/v36</url>
+    </release>
+    <release version="35" date="2020-03-22">
+      <url>https://github.com/GSConnect/gnome-shell-extension-gsconnect/releases/tag/v35</url>
+    </release>
+    <release version="34" date="2020-03-09">
+      <url>https://github.com/GSConnect/gnome-shell-extension-gsconnect/releases/tag/v34</url>
+    </release>
+    <release version="33" date="2020-03-04">
+      <url>https://github.com/GSConnect/gnome-shell-extension-gsconnect/releases/tag/v33</url>
+    </release>
+  </releases>
+
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/GSConnect/gnome-shell-extension-gsconnect/master/data/metainfo/image-01.png</image>
+      <caption>GSConnect in GNOME Shell</caption>
+    </screenshot>
+  </screenshots>
+</component>
