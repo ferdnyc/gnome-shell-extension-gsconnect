@@ -1,40 +1,38 @@
 name: CI
 
-on:
-  push:
-    branches: 
-      - master
-  pull_request:
-    branches: 
-      - master
-  workflow_dispatch:
+on: [push, pull_request, workflow_dispatch]
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    container:
-      image: gsconnect/gsconnect-ci:latest
     steps:
       - uses: actions/checkout@v2
+
       - name: Prepare
-        run: |
-          meson --prefix=/usr \
-                --libdir=lib/ \
-                -Dgnome_shell_libdir=/usr/lib64/ \
-                -Dpost_install=true \
-                _build
+        uses: ferdnyc/gsconnect-ci@gh-action
+        with:
+          commands: >
+            meson --prefix=/usr \
+                  --libdir=lib/ \
+                  -Dgnome_shell_libdir=/usr/lib64/ \
+                  -Dpost_install=true \
+                  _build
 
       - name: Uninstalled Tests
-        run: |
-          meson test -C _build --suite gsconnect:data \
-                               --suite gsconnect:lint \
-                               --print-errorlogs
+        uses: ferdnyc/gsconnect-ci@gh-action
+        with:
+          commands: >
+            meson test -C _build --suite gsconnect:data \
+                                 --suite gsconnect:lint \
+                                 --print-errorlogs
 
       - name: Installed Tests
-        run: |
-          ninja -C _build install
-          xvfb-run -a dbus-run-session -- \
-          gnome-desktop-testing-runner gsconnect -L _build/meson-logs
+        uses: ferdnyc@gsconnect-ci@gh-action
+        with:
+          commands: >
+            ninja -C _build install; \
+            xvfb-run -a dbus-run-session -- \
+            gnome-desktop-testing-runner gsconnect -L _build/meson-logs
 
       - name: Upload Test Logs
         if: ${{ always() }}
