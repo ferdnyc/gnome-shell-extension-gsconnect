@@ -27,7 +27,7 @@ jobs:
                                  --print-errorlogs
 
       - name: Installed Tests
-        uses: ferdnyc@gsconnect-ci@gh-action
+        uses: ferdnyc/gsconnect-ci@gh-action
         with:
           commands: >
             ninja -C _build install; \
