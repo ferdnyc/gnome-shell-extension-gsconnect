@@ -29,10 +29,9 @@ jobs:
       - name: Installed Tests
         uses: ferdnyc/gsconnect-ci@gh-action
         with:
-          commands: >
-            ninja -C _build install; \
-            xvfb-run -a dbus-run-session -- \
-            gnome-desktop-testing-runner gsconnect -L _build/meson-logs
+          commands: 'ninja -C _build install; \
+            xvfb-run -a dbus-run-session \
+            -- gnome-desktop-testing-runner gsconnect -L _build/meson-logs'
 
       - name: Upload Test Logs
         if: ${{ always() }}
