@@ -13,7 +13,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     container:
-      image: gsconnect/gsconnect-ci:latest
+      image: ghcr.io/ferdnyc/gsconnect-ci:latest
+        #credentials:
+        #  username: ${{ github.actor }}
+        #  password: ${{ secrets.github_token }}
     steps:
       - uses: actions/checkout@v2
       - name: Prepare
