@@ -43,7 +43,7 @@ body:
 
 - type: markdown
   attributes:
-    value: "## System details"
+    value: "# System details"
 
 - type: input
   id: gsconnect_version
@@ -79,7 +79,7 @@ body:
 
 - type: markdown
   attributes:
-    value: "## GSConnect environment"
+    value: "# GSConnect environment"
 
 - type: input
   id: devices
@@ -103,11 +103,15 @@ body:
 - type: markdown
   attributes:
     value: |
-        ## Screenshots
+        # Screenshots
+        
         If applicable, add screenshots to help explain your problem. You can drag-and-drop or cut-and-paste images directly into this edit window, to include them in your report.
+
+- type: markdown
+  attributes:
+    value: "# Additional notes"
 
 - type: textarea
   id: notes
   attributes:
-    label: Additional notes
     description: Any other useful details regarding the issue, your system environment, or this report
