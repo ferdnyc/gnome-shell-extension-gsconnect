@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 name: Feature request or idea
 description: Suggest an improvement to GSConnect
+labels: enhancement
 body:
 - type: textarea
   id: summary
