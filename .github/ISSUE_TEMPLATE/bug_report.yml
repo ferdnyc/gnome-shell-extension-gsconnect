@@ -110,8 +110,8 @@ body:
       ## Screenshots
 
       If applicable, add screenshots to help explain your problem.
-      You can drag-and-drop or cut-and-paste images directly into this edit form,
-      or into a followup comment, to include them with your report.
+      You can drag-and-drop or cut-and-paste images into a followup comment after submitting this form,
+      to include them in your report.
 
 - type: textarea
   id: notes
