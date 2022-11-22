@@ -8,7 +8,7 @@ body:
   id: summary
   attributes:
     label: Describe your request
-    description: |
+    description: >
       Is your feature request related to a problem?
       Please provide a clear and concise description of what the problem is.
     placeholder: I'm always frustrated when [...]
@@ -19,20 +19,21 @@ body:
   id: solution
   attributes:
     label: Proposed solution
-    description: |
+    description: >
       Describe the solution you'd like.
       Provide a clear and concise description of what you want to happen.
+    placeholder: It would be great if [...]
 
 - type: textarea
   id: alternatives
   attributes:
     label: Alternatives
     description: |
-      Give a clear and concise description of any alternative solutions or features you've considered.
+      A clear and concise summary of any alternative solutions or features you've considered.
 
 - type: markdown
   attributes:
-    value: "### System details"
+    value: "# System details"
 
 - type: input
   id: gsconnect_version
@@ -70,10 +71,13 @@ body:
   id: notes
   attributes:
    label: Additional context
-   description: |
+   description: >
      Add any other context for your suggestion,
      including screenshots if applicable.
 
+- type: markdown
+  attributes:
+    value: "# All device features must first exist in KDE Connect
 - type: markdown
   attributes:
     value: >
@@ -85,7 +89,7 @@ body:
 
       Any request that would require features not supported in KDE Connect,
       or would require GSConnect to deviate from the KDE Connect protocols,
-      cannot be implemented.
-      Any such requests should be made to the KDE Connect project.
+      cannot be implemented and will not be considered.
+      All such requests should be made to the KDE Connect project.
       The requested functionality can only be implemented in GSConnect
-      after support is added to KDE Connect.
+      **after** support is added to KDE Connect.
