@@ -109,9 +109,10 @@ body:
 
 - type: markdown
   attributes:
-    value: "# Additional notes"
+    value: "# Additional details"
 
 - type: textarea
   id: notes
   attributes:
+    label: Notes
     description: Any other useful details regarding the issue, your system environment, or this report
