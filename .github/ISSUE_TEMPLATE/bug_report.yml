@@ -6,11 +6,10 @@ description: Report an issue to help us improve GSConnect
 body:
 - type: markdown
   attributes:
-    value: |
-      > _**ATTENTION**: GSConnect only supports the latest, stable version of GNOME. We are no longer accepting bug reports for previous versions._
+    value: "> **ATTENTION**: GSConnect only supports the latest, stable version of GNOME. We are no longer accepting bug reports for previous versions."
 
 - type: textarea
-  id: bug_summary
+  id: summary
   attributes:
     label: Describe the bug
     description: "A clear and concise description of what the bug is."
@@ -18,7 +17,7 @@ body:
     required: true
 
 - type: textarea
-  id: repro_steps
+  id: repro
   attributes:
     label: Steps to reproduce
     description: "List the steps to perform that will trigger the bug."
@@ -35,7 +34,7 @@ body:
     description: "A clear and concise description of what you expected to happen."
 
 - type: textarea
-  id: support_log
+  id: logs
   attributes:
     label: Support log
     description: "Please generate a support log ([Instructions](../wiki/Help#generate-support-log))"
@@ -44,7 +43,7 @@ body:
 
 - type: markdown
   attributes:
-    value: "### System details"
+    value: "## System details"
 
 - type: input
   id: gsconnect_version
@@ -55,7 +54,7 @@ body:
     required: true
 
 - type: dropdown
-  id: install_source
+  id: source
   attributes:
     label: Installed from
     options:
@@ -80,7 +79,7 @@ body:
 
 - type: markdown
   attributes:
-    value: "### GSConnect environment"
+    value: "## GSConnect environment"
 
 - type: input
   id: devices
@@ -104,10 +103,11 @@ body:
 - type: markdown
   attributes:
     value: |
+        ## Screenshots
         If applicable, add screenshots to help explain your problem. You can drag-and-drop or cut-and-paste images directly into this edit window, to include them in your report.
 
 - type: textarea
-  id: additional_notes
+  id: notes
   attributes:
     label: Additional notes
     description: Any other useful details regarding the issue, your system environment, or this report
