@@ -33,14 +33,6 @@ body:
     label: Expected behavior
     description: "A clear and concise description of what you expected to happen."
 
-- type: textarea
-  id: logs
-  attributes:
-    label: Support log
-    description: "Please generate a support log ([Instructions](../wiki/Help#generate-support-log))"
-    placeholder: "Paste any support log messages related to this issue here."
-    render: plain text
-
 - type: markdown
   attributes:
     value: "# System details"
@@ -102,14 +94,24 @@ body:
 
 - type: markdown
   attributes:
-    value: |
-        # Screenshots
-        
-        If applicable, add screenshots to help explain your problem. You can drag-and-drop or cut-and-paste images directly into this edit window, to include them in your report.
+    value: "# Additional materials"
+
+- type: textarea
+  id: logs
+  attributes:
+    label: Support log
+    description: "Please generate a support log ([Instructions](../wiki/Help#generate-support-log))"
+    placeholder: "Paste any support log messages related to this issue here."
+    render: plain text
 
 - type: markdown
   attributes:
-    value: "# Additional details"
+    value: |
+      ## Screenshots
+
+      If applicable, add screenshots to help explain your problem.
+      You can drag-and-drop or cut-and-paste images directly into this edit form,
+      or into a followup comment, to include them with your report.
 
 - type: textarea
   id: notes
