@@ -104,14 +104,15 @@ body:
     placeholder: "Paste any support log messages related to this issue here."
     render: plain text
 
-- type: markdown
+- type: textarea
+  id: screenshots
   attributes:
-    value: |
-      ## Screenshots
-
+    label: Screenshots
+    description: |
       If applicable, add screenshots to help explain your problem.
-      You can drag-and-drop or cut-and-paste images into a followup comment after submitting this form,
-      to include them in your report.
+      You can drag-and-drop or cut-and-paste images into the text areas on this form.
+      Use either the box below, or a different field if appropriate.
+    placeholder: (Drop images here.)
 
 - type: textarea
   id: notes
