@@ -4,14 +4,9 @@ about: Report an issue to help us improve GSConnect
 title: ''
 labels: ''
 assignees: ''
-
----
-
-<!--
 SPDX-FileCopyrightText: GSConnect Developers https://github.com/GSConnect
-
 SPDX-License-Identifier: GPL-2.0-or-later
--->
+---
 
 > ***ATTENTION**: GSConnect only supports the latest, stable version of GNOME. We are no longer accepting bug reports for previous versions.*
 

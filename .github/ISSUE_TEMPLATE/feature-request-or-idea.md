@@ -4,14 +4,9 @@ about: Suggest an improvement to GSConnect
 title: ''
 labels: ''
 assignees: ''
-
----
-
-<!--
 SPDX-FileCopyrightText: GSConnect Developers https://github.com/GSConnect
-
 SPDX-License-Identifier: GPL-2.0-or-later
--->
+---
 
 **Is your feature request related to a problem? Please describe.**
 A clear and concise description of what the problem is. Ex. I'm always frustrated when [...]
