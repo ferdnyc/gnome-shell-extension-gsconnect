@@ -26,10 +26,15 @@ if (GLib.getenv('GSCONNECT_TEST')) {
 }
 
 
+const _setup = imports.service.utils.setup;
 const {Device} = imports.service.device;
 const {Plugin} = imports.service.plugin;
 
 const {ChannelService} = imports.fixtures.backend;
+
+
+// Force testing under GNOME
+globalThis.HAVE_GNOME = true;
 
 
 /*

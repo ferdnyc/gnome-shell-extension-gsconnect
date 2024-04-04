@@ -4,7 +4,7 @@
 
 project('gsconnect',
   'c',
-  version: '54',
+  version: '56',
   meson_version: '>= 0.59.0',
 )
 
@@ -55,6 +55,20 @@ extconfig.set('SSHKEYGEN_PATH', get_option('sshkeygen_path'))
 
 # ZIP targets for user extension builds
 env_util = find_program('env')
+
+run_target(
+  'make-pkgdir',
+  command: [
+    env_util,
+    'UUID=' + extuuid,
+    'DATADIR=' + datadir,
+    'LOCALEDIR=' + localedir,
+    'GSCHEMADIR=' + gschemadir,
+    'NOZIP=true',
+    join_paths(meson.project_source_root(), 'build-aux', 'ego', 'mkzip.sh')
+  ]
+)
+
 
 run_target(
   'make-zip',

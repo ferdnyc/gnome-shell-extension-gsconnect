@@ -15,6 +15,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <key name="show-indicators" type="b">
       <default>false</default>
     </key>
+    <key name="keep-alive-when-locked" type="b">
+      <default>true</default>
+    </key>
+    <key name="create-native-messaging-hosts" type="b">
+      <default>true</default>
+    </key>
 
     <!-- Service Settings -->
     <key name="id" type="s">
@@ -53,7 +59,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <default>{}</default>
     </key>
     <key name="menu-actions" type="as">
-      <default>["sms", "ring", "mount", "commands", "share", "photo", "keyboard"]</default>
+      <default>["sms", "ring", "mount", "commands", "share", "keyboard"]</default>
     </key>
     <key name="name" type="s">
       <default>""</default>
@@ -135,19 +141,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <default>'{}'</default>
     </key>
   </schema>
-  <schema id="org.gnome.Shell.Extensions.GSConnect.Plugin.Photo">
-    <key name="share-camera" type="b">
-      <default>true</default>
-    </key>
-    <key name="receive-directory" type="s">
-      <default>""</default>
-    </key>
-  </schema>
   <schema id="org.gnome.Shell.Extensions.GSConnect.Plugin.Ping"/>
   <schema id="org.gnome.Shell.Extensions.GSConnect.Plugin.Presenter"/>
   <schema id="org.gnome.Shell.Extensions.GSConnect.Plugin.RunCommand">
     <key name="command-list" type="a{sv}">
-      <default>{}</default>
+      <default><![CDATA[{'lock': <{'name': 'Lock', 'command': 'xdg-screensaver lock'}>, 'restart': <{'name': 'Restart', 'command': 'systemctl reboot'}>, 'logout': <{'name': 'Log Out', 'command': 'gnome-session-quit --logout --no-prompt'}>, 'poweroff': <{'name': 'Power Off', 'command': 'systemctl poweroff'}>, 'suspend': <{'name': 'Suspend', 'command': 'systemctl suspend'}>}]]></default>
     </key>
   </schema>
   <schema id="org.gnome.Shell.Extensions.GSConnect.Plugin.SFTP">

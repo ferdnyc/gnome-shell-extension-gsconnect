@@ -7,7 +7,6 @@
 const Gio = imports.gi.Gio;
 const GLib = imports.gi.GLib;
 const GObject = imports.gi.GObject;
-const ByteArray = imports.byteArray;
 
 const Config = imports.config;
 const Components = imports.service.components;
@@ -109,6 +108,7 @@ var Device = GObject.registerClass({
             ),
             path: `/org/gnome/shell/extensions/gsconnect/device/${this.id}/`,
         });
+        this._migratePlugins();
 
         // Watch for changes to supported and disabled plugins
         this._disabledPluginsChangedId = this.settings.connect(
@@ -201,8 +201,8 @@ var Device = GObject.registerClass({
             if (a.compare(b) < 0)
                 [a, b] = [b, a]; // swap
             const checksum = new GLib.Checksum(GLib.ChecksumType.SHA256);
-            checksum.update(ByteArray.fromGBytes(a));
-            checksum.update(ByteArray.fromGBytes(b));
+            checksum.update(a.toArray());
+            checksum.update(b.toArray());
             verificationKey = checksum.get_string();
         }
 
@@ -253,6 +253,15 @@ var Device = GObject.registerClass({
         return this.settings.get_string('type');
     }
 
+    _migratePlugins() {
+        const deprecated = ['photo'];
+        const supported = this.settings
+            .get_strv('supported-plugins')
+            .filter(name => !deprecated.includes(name));
+
+        this.settings.set_strv('supported-plugins', supported);
+    }
+
     _handleIdentity(packet) {
         this.freeze_notify();
 
@@ -289,10 +298,6 @@ var Device = GObject.registerClass({
         const supported = [];
 
         for (const name in imports.service.plugins) {
-            // Exclude mousepad/presenter plugins in unsupported sessions
-            if (!HAVE_REMOTEINPUT && ['mousepad', 'presenter'].includes(name))
-                continue;
-
             const meta = imports.service.plugins[name].Metadata;
 
             if (meta === undefined)

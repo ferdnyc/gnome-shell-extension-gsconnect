@@ -132,21 +132,6 @@ var ConnectDialog = GObject.registerClass({
 });
 
 
-function rowSeparators(row, before) {
-    const header = row.get_header();
-
-    if (before === null) {
-        if (header !== null)
-            header.destroy();
-
-        return;
-    }
-
-    if (header === null)
-        row.set_header(new Gtk.Separator({visible: true}));
-}
-
-
 var Window = GObject.registerClass({
     GTypeName: 'GSConnectPreferencesWindow',
     Properties: {
@@ -213,7 +198,7 @@ var Window = GObject.registerClass({
         this.service_box.set_focus_vadjustment(this.service_window.vadjustment);
 
         // Device List
-        this.device_list.set_header_func(rowSeparators);
+        this.device_list.set_header_func(Device.rowSeparators);
 
         // Discoverable InfoBar
         this.settings.bind(
@@ -226,6 +211,9 @@ var Window = GObject.registerClass({
 
         // Application Menu
         this._initMenu();
+
+        // Setting: Keep Alive When Locked
+        this.add_action(this.settings.create_action('keep-alive-when-locked'));
 
         // Broadcast automatically every 5 seconds if there are no devices yet
         this._refreshSource = GLib.timeout_add_seconds(
@@ -658,4 +646,3 @@ var Window = GObject.registerClass({
             this.device_list_placeholder.label = _('Waiting for service…');
     }
 });
-
